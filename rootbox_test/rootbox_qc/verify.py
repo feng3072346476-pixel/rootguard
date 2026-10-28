@@ -1,0 +1,525 @@
+"""质检编排：加载图片、跑检测、生成结构化报告。兼容中文路径。
+
+线上（拍摄即检）接口：
+    verify_single(path, config_or_thresholds)  # 拍完一张立即校验，不合格当场重拍该张
+    verify_pair(path_a, path_b, ...)           # 两张灯照都拍完后再校验（含错位比对）
+
+离线（批量）接口：
+    run(input_dir, ...)                        # 扫描目录，见 runner.py
+"""
+from __future__ import annotations
+
+import importlib.util
+import logging
+import os
+import time
+from dataclasses import dataclass, field, asdict
+
+import cv2
+import numpy as np
+
+from . import checks, frame as frame_mod
+from .config import load_config, get_thresholds, get_frame_params
+
+logger = logging.getLogger("rootbox_qc")
+
+
+@dataclass
+class ImageResult:
+    path: str
+    checks: list = field(default_factory=list)
+    load_error: str | None = None
+
+    @property
+    def passed(self) -> bool:
+        return self.load_error is None and all(c["passed"] for c in self.checks)
+
+
+@dataclass
+class QCReport:
+    pair_id: str
+    images: list = field(default_factory=list)
+    alignment_pair: dict | None = None
+    repeat_pair: dict | None = None   # 两张灯照完全相同（重复拍摄），独立类别
+    blur_pair: dict | None = None     # 两张里一张锐一张糊（灯照拖影/失焦），独立类别
+    illumination_pair: dict | None = None  # 单灯管/单侧照明缺失（损坏）
+    recapture_needed: bool = False
+    recapture_reasons: list = field(default_factory=list)
+    recapture_targets: list = field(default_factory=list)
+    attempt: int = 1
+    max_attempts: int = 2
+    escalate_manual: bool = False     # attempt >= max_attempts 且仍不合格时转人工/停机
+    systemic_alert: str | None = None # 连续多组命中同类故障时的系统性熔断告警
+    stitched_path: str | None = None  # 质检通过后内存直传无缝拼接的输出路径（若启用）
+    stitch_error: str | None = None   # 拼接脚本缺失/执行失败时的明确错误（不影响质检结论）
+    timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S"))
+
+    def to_dict(self) -> dict:
+        d = asdict(self)
+        d["passed"] = not self.recapture_needed
+        # 对外文档契约（README）：重拍队列 / HTTP 消费方读 reasons / targets，
+        # 与内部字段名 recapture_reasons / recapture_targets 保持一致别名
+        d["reasons"] = self.recapture_reasons
+        d["targets"] = self.recapture_targets
+        return d
+
+
+def load_image(path: str, *, auto_rotate: bool = True):
+    """读取图像（兼容中文路径）。返回 (img_bgr, gray)；失败返回 (None, None)。
+
+    当 auto_rotate=True 且输入为实拍大图竖构图（H > W 且短边 >= 2000px）时，
+    自动顺时针旋转 90° 统一为横置构图（与无缝拼接模块保持一致）。
+    """
+    try:
+        buf = np.fromfile(path, dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("读取失败 %s: %s", path, e)
+        return None, None
+    if img is None:
+        logger.warning("解码失败（文件损坏/格式错误）: %s", path)
+        return None, None
+    if auto_rotate and img.shape[0] > img.shape[1] and min(img.shape[0], img.shape[1]) >= 2000:
+        img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
+    if img.ndim == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+    return img, gray
+
+
+def _resolve_single_input_kind(path: str | None, gray: np.ndarray | None, th: dict) -> str:
+    """当 input_kind='auto' 时，为单张图片自动推断模态（'raw' | 'mosaic' | 'auto'）。
+
+    判据：
+      1) 文件名主干为 1 / 2 或以 _1 / _2 结尾 → 原图 'raw'；
+      2) 包含已知产线拼接缝特征（_layout_match_count >= 2）→ 成品平图 'mosaic'；
+      3) 实拍大图（宽 >= 2000）按双光源条带反光不对称性识别：
+         单灯原图在 stripA 与 stripB 之间的高光(>220)占比高度不对称（一侧 >=1.5% 且 >= 另一侧 4 倍）；
+         而拼接成品图已去除单侧反光带且文件名非 1/2 → 'mosaic'。
+    """
+    kind = th.get("input_kind", "auto")
+    if kind in ("raw", "mosaic"):
+        return kind
+    if path is not None:
+        stem = os.path.splitext(os.path.basename(path))[0].lower()
+        if stem in ("1", "2") or stem.endswith("_1") or stem.endswith("_2"):
+            return "raw"
+    if gray is not None:
+        try:
+            cands = [c[0] for c in checks._find_seam_candidates(gray, th)]
+            if checks._layout_match_count(cands, gray.shape[1], th) >= 2:
+                return "mosaic"
+        except Exception:  # noqa: BLE001
+            pass
+        if min(gray.shape[:2]) >= 2000:
+            g = gray if gray.shape[0] <= gray.shape[1] else cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
+            w = g.shape[1]
+            cuts = th.get("blur_strip_cuts") or [2000, 2700, 3300]
+            if len(cuts) >= 3 and 0 < cuts[0] < cuts[1] < cuts[2] < w:
+                c1, c2, c3 = int(cuts[0]), int(cuts[1]), int(cuts[2])
+                ga = float((np.concatenate([g[:, 0:c1], g[:, c2:c3]], axis=1) > 220).mean())
+                gb = float((np.concatenate([g[:, c1:c2], g[:, c3:w]], axis=1) > 220).mean())
+                hi, lo = max(ga, gb), min(ga, gb)
+                if hi >= 0.015 and hi >= 4.0 * max(lo, 1e-4):
+                    return "raw"
+                return "mosaic"
+    return "auto"
+
+
+_STITCH_MOD = None
+_STITCH_MOD_PATH = None
+
+
+def _load_stitch_module(stitch_script: str):
+    """按路径加载无缝拼接脚本；脚本路径变化时重新加载。"""
+    global _STITCH_MOD, _STITCH_MOD_PATH
+    script_abs = os.path.abspath(stitch_script)
+    if _STITCH_MOD is not None and _STITCH_MOD_PATH == script_abs:
+        return _STITCH_MOD
+    spec = importlib.util.spec_from_file_location("tupian_stitch", script_abs)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"无法加载无缝拼接脚本: {script_abs}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    _STITCH_MOD = mod
+    _STITCH_MOD_PATH = script_abs
+    return mod
+
+
+def _stitch_in_memory(img_a: np.ndarray, img_b: np.ndarray, pair_id: str,
+                      stitch_output_dir: str, stitch_script: str) -> str:
+    """质检通过后直接将内存中已解码的 img_a, img_b 送入无缝拼接模块。"""
+    if not stitch_script or not os.path.isfile(stitch_script):
+        raise FileNotFoundError(
+            f"无缝拼接脚本不存在: {stitch_script!r}"
+            "（配置 paths.stitch_script 或环境变量 ROOTBOX_QC_STITCH_SCRIPT）")
+    mod = _load_stitch_module(stitch_script)
+    os.makedirs(stitch_output_dir, exist_ok=True)
+    out_path = os.path.join(stitch_output_dir, f"{pair_id}.png")
+    res_path = mod.stitch_from_qc(img_a, img_b, out_path)
+    return res_path if res_path else out_path
+
+
+def _run_single_checks(path, img, gray, frame, th) -> ImageResult:
+    res = ImageResult(path=path)
+    res.checks.append(checks.check_corruption(path=path, img_bgr=img, th=th))
+    if img is None or gray is None:
+        res.load_error = "decode_failed"
+        return res
+    res.checks.append(checks.check_blur(img, gray, frame, th, path=path))
+    res.checks.append(checks.check_completeness(img, gray, frame, th))
+    res.checks.append(checks.check_alignment_single(img, gray, frame, th))
+    return res
+
+
+# 特征检测缓存：只缓存 frame 结果（小 dict，不缓存大图矩阵，避免内存爆炸）
+# 键 = (规范化路径, mtime, size, frame_detect 参数哈希)，容量上限防止常驻进程无限增长
+_FRAME_CACHE: dict = {}
+_FRAME_CACHE_MAX = 512
+
+
+def _prepare(path, cfg) -> tuple:
+    """加载单图 + 特征检测；任何异常都隔离为 load_error，不让单张拖垮整批。
+
+    特征检测结果按 (路径, mtime, size, frame 参数) 缓存（LRU 上限 512）——
+    线上 verify_single 后紧接着调 verify_pair、或阈值搜索/重复导出时，
+    同一张图不重复做形态学+连通域分析（仅缓存 frame，大图矩阵随用随释放）。
+    """
+    key = None
+    try:
+        st = os.stat(path)
+        fp = get_frame_params(cfg)
+        key = (os.path.normpath(path), st.st_mtime_ns, st.st_size,
+               hash(tuple(sorted((k, str(v)) for k, v in fp.items()))))
+    except OSError:
+        key = None
+    auto_rot = bool(get_thresholds(cfg).get("auto_rotate_landscape", True))
+    img, gray = load_image(path, auto_rotate=auto_rot)
+    frame = None
+    if key is not None and key in _FRAME_CACHE:
+        frame = _FRAME_CACHE.pop(key)
+        _FRAME_CACHE[key] = frame  # 移到队尾（LRU）
+    if frame is None:
+        try:
+            frame = frame_mod.detect_frame(img, get_frame_params(cfg)) \
+                if img is not None else None
+        except Exception as e:  # noqa: BLE001
+            logger.error("特征检测异常 %s: %s", path, e)
+            frame = None
+        if key is not None and frame is not None:
+            if len(_FRAME_CACHE) >= _FRAME_CACHE_MAX:
+                _FRAME_CACHE.pop(next(iter(_FRAME_CACHE)))
+            _FRAME_CACHE[key] = frame
+    return img, gray, (frame or {})
+
+
+def _extract_image_result(prev, expected_path: str) -> ImageResult | None:
+    """从 verify_single 返回的 QCReport 或 ImageResult 中提取可复用的单图结果。"""
+    if isinstance(prev, ImageResult):
+        return prev
+    if isinstance(prev, QCReport) and prev.images:
+        norm_exp = os.path.normpath(expected_path)
+        for im in prev.images:
+            if os.path.normpath(im.path) == norm_exp:
+                return im
+        return prev.images[0]
+    return None
+
+
+# ============================================================================
+# 线上（单张即检）
+# ============================================================================
+def verify_single(path: str, cfg: dict | None = None, *, pair_id: str | None = None,
+                  attempt: int = 1, input_kind: str | None = None) -> QCReport:
+    """拍摄完一张立即校验（损坏/模糊/倾斜/不全/单张错位）。
+
+    用法：机器拍完 1 张 → verify_single → recapture_needed=True 则重拍第 1 张；
+         拍完第 2 张 → verify_single → 通过后调用 verify_pair 补错位检查。
+    input_kind: "auto"（默认）| "raw"（原图：跳过单张拼缝检查）| "mosaic"（成品图：跳过存活列判定）。
+    """
+    cfg = _as_cfg(cfg)
+    th = dict(get_thresholds(cfg))
+    if input_kind is not None:
+        th["input_kind"] = input_kind
+    max_att = int((cfg.get("recapture") or {}).get("max_attempts", 3))
+    pair_id = pair_id or os.path.splitext(os.path.basename(path))[0]
+    report = QCReport(pair_id=pair_id, attempt=attempt, max_attempts=max_att)
+
+    img, gray, frame = _prepare(path, cfg)
+    if th.get("input_kind", "auto") == "auto":
+        th["input_kind"] = _resolve_single_input_kind(path, gray, th)
+    res = _run_single_checks(path, img, gray, frame, th)
+    report.images.append(res)
+    _collect_report(report, path_b=None)
+    return report
+
+
+# ============================================================================
+# 双张（含错位比对）
+# ============================================================================
+def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
+                pair_id: str | None = None, attempt: int = 1,
+                input_kind: str | None = None,
+                stitch_output_dir: str | None = None,
+                res_a: ImageResult | QCReport | None = None,
+                res_b: ImageResult | QCReport | None = None) -> QCReport:
+    """两张灯照成对校验：各自单图检查 + 两张间错位比对。
+
+    线上已调过 verify_single(path_a) / verify_single(path_b) 时，可将返回报告传入
+    res_a / res_b 直接复用单图检查结果，避免重复计算单图卷积与连通域。
+    若提供 stitch_output_dir（或在 cfg.paths.stitch_output_dir 中配置），当成对原图质检
+    全部通过时，直接将内存中已解码的 img_a/img_b 传入 cfg.paths.stitch_script 指向的
+    无缝拼接器生成 <pair_id>.png；脚本缺失或执行失败时记入 report.stitch_error。
+    """
+    cfg = _as_cfg(cfg)
+    th = dict(get_thresholds(cfg))
+    if input_kind is not None:
+        th["input_kind"] = input_kind
+    max_att = int((cfg.get("recapture") or {}).get("max_attempts", 3))
+    pair_id = pair_id or os.path.splitext(os.path.basename(path_a))[0]
+    report = QCReport(pair_id=pair_id, attempt=attempt, max_attempts=max_att)
+
+    img_a, gray_a, frame_a = _prepare(path_a, cfg)
+    if th.get("input_kind", "auto") == "auto":
+        th["input_kind"] = "raw" if path_b is not None else _resolve_single_input_kind(path_a, gray_a, th)
+    prev_a = _extract_image_result(res_a, path_a)
+    report.images.append(prev_a if prev_a is not None
+                         else _run_single_checks(path_a, img_a, gray_a, frame_a, th))
+
+    if path_b is not None:
+        img_b, gray_b, frame_b = _prepare(path_b, cfg)
+        prev_b = _extract_image_result(res_b, path_b)
+        report.images.append(prev_b if prev_b is not None
+                             else _run_single_checks(path_b, img_b, gray_b, frame_b, th))
+        if img_a is not None and img_b is not None:
+            pair = None
+            try:
+                pair = checks.pair_analyze(img_a, img_b, th)
+            except Exception as e:  # noqa: BLE001
+                logger.error("成对预处理异常 %s/%s: %s", path_a, path_b, e)
+
+            for attr, check_name, label, fn in (
+                ("alignment_pair", "alignment_pair", "错位比对",
+                 lambda: checks.check_alignment_pair(
+                     img_a, img_b, frame_a, frame_b, th, pair=pair,
+                     path_a=path_a, path_b=path_b)),
+                ("repeat_pair", "repeat", "重复拍摄比对",
+                 lambda: checks.check_repeat_pair(
+                     img_a, img_b, th, path_a=path_a, path_b=path_b, pair=pair)),
+                ("blur_pair", "blur_pair", "成对模糊比对",
+                 lambda: checks.check_blur_pair(
+                     img_a, img_b, frame_a, frame_b, th, path_a=path_a, path_b=path_b)),
+                ("illumination_pair", "illum_pair", "照明比对",
+                 lambda: checks.check_illumination_pair(img_a, img_b, th)),
+            ):
+                try:
+                    setattr(report, attr, fn())
+                except Exception as e:  # noqa: BLE001
+                    logger.error("%s异常 %s/%s: %s", label, path_a, path_b, e)
+                    setattr(report, attr,
+                            checks._fail(check_name, {}, {}, f"{label}异常: {e}"))
+
+    _collect_report(report, path_b)
+    eff_stitch_dir = stitch_output_dir or (cfg.get("paths") or {}).get("stitch_output_dir")
+    if (eff_stitch_dir and not report.recapture_needed
+            and path_b is not None and img_a is not None and img_b is not None):
+        stitch_script = (cfg.get("paths") or {}).get("stitch_script")
+        try:
+            report.stitched_path = _stitch_in_memory(
+                img_a, img_b, report.pair_id, eff_stitch_dir, stitch_script)
+        except Exception as e:  # noqa: BLE001 —— 拼接失败不改变质检结论，但必须显式暴露
+            report.stitch_error = f"无缝拼接失败: {e}"
+            logger.error("%s pair=%s", report.stitch_error, report.pair_id)
+    return report
+
+
+def _collect_report(report: QCReport, path_b: str | None) -> None:
+    """汇总结论：recapture_needed / reasons / targets / escalate_manual。"""
+    reasons = []
+    targets = []
+    for r in report.images:
+        if r.load_error or not r.passed:
+            label = os.path.basename(r.path)
+            failed = [c["reason"] for c in r.checks if not c["passed"]]
+            if r.load_error:
+                failed = [f"图片损坏({r.load_error})"] + failed
+            if failed:
+                reasons.append(f"[{label}] " + "；".join(failed))
+                targets.append(r.path)
+
+    if report.alignment_pair is not None and not report.alignment_pair["passed"]:
+        reasons.append("[整对] " + report.alignment_pair["reason"])
+        for p in (report.images[0].path, path_b):
+            if p and p not in targets:
+                targets.append(p)
+
+    if report.repeat_pair is not None and not report.repeat_pair["passed"]:
+        reasons.append("[整对] " + report.repeat_pair["reason"])
+        for p in (report.images[0].path, path_b):
+            if p and p not in targets:
+                targets.append(p)
+
+    if report.blur_pair is not None and not report.blur_pair["passed"]:
+        reasons.append("[整对] " + report.blur_pair["reason"])
+        # 只有糊的那一张需要重拍（另一张清晰），软路径由 metric 直接给出；无软路径时退回整对
+        soft = (report.blur_pair.get("metric") or {}).get("soft_path")
+        blur_targets = [soft] if soft else [report.images[0].path, path_b]
+        for p in blur_targets:
+            if p and p not in targets:
+                targets.append(p)
+
+    if report.illumination_pair is not None and not report.illumination_pair["passed"]:
+        reasons.append("[整对] " + report.illumination_pair["reason"])
+        # 照明异常需整对重拍（灯管/曝光问题，两张都不可用）
+        for p in (report.images[0].path, path_b):
+            if p and p not in targets:
+                targets.append(p)
+
+    report.recapture_needed = len(reasons) > 0
+    report.recapture_reasons = reasons
+    report.recapture_targets = targets
+    report.escalate_manual = bool(report.recapture_needed and report.attempt >= report.max_attempts)
+
+
+# ============================================================================
+# 检查名 → 问题类别（汇总统计 / 导出分类统一用这张表）
+# 2026-10-19：此前 runner 从中文原因文案里按关键词猜类别，Rule A 不全被归"其它"、
+# 重复拍摄因文案含"拼接"被归"错位"、单灯管照明被归"其它"；导出脚本另有一份
+# 名单且漏了 blur_pair / illum_pair。新增检查只需在这里登记一次。
+# ============================================================================
+CHECK_CATEGORY = {
+    "corruption": "损坏",
+    "illum_pair": "损坏",          # 单灯管/单侧照明缺失（README：归损坏）
+    "blur": "模糊",
+    "blur_pair": "模糊",
+    "completeness": "不全",
+    "alignment_pair": "错位",
+    "alignment_single": "错位",
+    "repeat": "重复拍摄",
+}
+CATEGORY_ORDER = ("损坏", "模糊", "不全", "错位", "重复拍摄", "其它")
+
+# QCReport 上的成对检查字段（字段名, 检查名）
+_PAIR_FIELDS = (("alignment_pair", "alignment_pair"),
+                ("repeat_pair", "repeat"),
+                ("blur_pair", "blur_pair"),
+                ("illumination_pair", "illum_pair"))
+
+
+def category_of(check_name: str) -> str:
+    """检查名 → 类别；未登记的检查归"其它"。"""
+    return CHECK_CATEGORY.get(check_name, "其它")
+
+
+def failed_checks(report: QCReport) -> list:
+    """列出报告中全部未通过的检查（结构化，不依赖原因文案）。
+
+    Returns: list of dict
+        name     : 检查名（corruption / blur / ... / illum_pair）
+        category : 类别（见 CHECK_CATEGORY）
+        scope    : "image"（单图检查）或 "pair"（整对检查）
+        paths    : 该失败涉及的图片路径列表
+        reason   : 原因文案
+    """
+    out = []
+    img_paths = [r.path for r in report.images]
+    for r in report.images:
+        if r.load_error:
+            out.append({"name": "corruption", "category": category_of("corruption"),
+                        "scope": "image", "paths": [r.path],
+                        "reason": f"图片损坏({r.load_error})"})
+        for c in r.checks:
+            if not c["passed"]:
+                out.append({"name": c["name"], "category": category_of(c["name"]),
+                            "scope": "image", "paths": [r.path], "reason": c["reason"]})
+    for field_name, default_name in _PAIR_FIELDS:
+        res = getattr(report, field_name, None)
+        if res is None or res["passed"]:
+            continue
+        name = res.get("name") or default_name
+        paths = list(img_paths)
+        if default_name == "blur_pair":
+            # 成对模糊只有糊的那张有问题（另一张清晰）
+            soft = (res.get("metric") or {}).get("soft_path")
+            if soft in img_paths:
+                paths = [soft]
+        out.append({"name": name, "category": category_of(name), "scope": "pair",
+                    "paths": paths, "reason": res["reason"]})
+    return out
+
+
+def _as_cfg(cfg: dict | None) -> dict:
+    """接受完整 config（含缺字段时补齐）或纯阈值 dict（旧调用兼容）。"""
+    base = load_config()
+    if cfg is None:
+        return base
+    if isinstance(cfg, dict) and ("paths" in cfg or "pairing" in cfg or "thresholds" in cfg):
+        # 完整/部分 config：字段级合并到默认值
+        for k in ("paths", "pairing", "thresholds", "frame_detect", "recapture", "notifier"):
+            if k in cfg and isinstance(cfg[k], dict):
+                base[k] = {**base.get(k, {}), **cfg[k]}
+        return base
+    if isinstance(cfg, dict):  # 纯阈值 dict：合入默认配置
+        base["thresholds"].update(cfg)
+        return base
+    return base
+
+
+class RecaptureTracker:
+    """重拍熔断与逐对尝试次数追踪器（线上巡检循环 & 批量 runner 共用）。
+
+    解决问题：
+      1. 同一 pair_id 重复重拍达 max_attempts 后标记 escalate_manual=True（转人工）；
+      2. 连续 N 个不同根盒因同类原因（如灯管熄灭、镜头脏污、导轨卡死）失败时，
+         设置 report.systemic_alert 提示系统性硬件故障，避免整排盲目重拍。
+    """
+
+    def __init__(self, max_attempts: int | None = None,
+                 max_consecutive_same_category: int | None = None):
+        rcfg = load_config().get("recapture", {})
+        self.max_attempts = int(
+            max_attempts if max_attempts is not None else rcfg.get("max_attempts", 2)
+        )
+        self.max_consecutive = int(
+            max_consecutive_same_category
+            if max_consecutive_same_category is not None
+            else rcfg.get("max_consecutive_same_category", 5)
+        )
+        self.pair_attempts: dict[str, int] = {}
+        self.consecutive_by_cat: dict[str, int] = {}
+
+    def next_attempt(self, pair_id: str) -> int:
+        """返回某个 pair_id 下一次质检对应的 attempt 序号（从 1 起）。"""
+        return self.pair_attempts.get(pair_id, 0) + 1
+
+    def observe(self, report: QCReport) -> QCReport:
+        """登记一次质检结果，更新 report.escalate_manual 与 report.systemic_alert。"""
+        pid = report.pair_id
+        self.pair_attempts[pid] = max(self.pair_attempts.get(pid, 0), report.attempt)
+        report.max_attempts = self.max_attempts
+        report.escalate_manual = bool(
+            report.recapture_needed and report.attempt >= report.max_attempts
+        )
+
+        if not report.recapture_needed:
+            self.consecutive_by_cat.clear()
+            return report
+
+        cats = {f["category"] for f in failed_checks(report)}
+        # 仅保留本次仍出现的类别计数，其余清零
+        for c in list(self.consecutive_by_cat.keys()):
+            if c not in cats:
+                del self.consecutive_by_cat[c]
+        triggered = []
+        for c in sorted(cats):
+            cnt = self.consecutive_by_cat.get(c, 0) + 1
+            self.consecutive_by_cat[c] = cnt
+            if self.max_consecutive > 0 and cnt >= self.max_consecutive:
+                triggered.append(f"{c}连续{cnt}组")
+        if triggered and not report.systemic_alert:
+            report.systemic_alert = (
+                f"疑似系统性故障（{'、'.join(triggered)}失败），建议暂停重拍并检查灯光/相机/导轨"
+            )
+        return report
+

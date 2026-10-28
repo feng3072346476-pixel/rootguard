@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 质检大数据与产物（不纳入版本管理）
+data/
+dataed/
+logs/
+results/
+
+# 备份与压缩包
+_backup_*/
+rootbox_test_backup_*/
+*.rar
+*.bak
+
+# 本地 IDE
+.vscode/
