@@ -26,6 +26,11 @@
   `expected_width/expected_height` 并重新标定刀口。
 - **竖拍修复**：`load_image` 旋转后，损坏检查的"解码尺寸 vs 文件头"核对接受
   转置尺寸，不再把竖拍原图误报"疑似文件截断"。
+- **生产流程**：两张单图各自检查 -> 任一不过立即返回（不拼接）-> 两张都过后
+  成对比对 -> 调 `paths.stitch_script` 拼接 -> 对成品按 `mosaic` 再跑
+  损坏/模糊/不全/单张错位。生产**必须**设 `ROOTBOX_QC_STITCH_DIR`（或
+  `cfg["paths"]["stitch_output_dir"]`），否则默认只完成前两步，
+  `stitched_status=None`，不是完整流程。
 
 > 原代码备份：`_backup_20260904/`（未动，可对照/回滚）
 > 旧版改造说明：修复 LED 检测失效、接线未生效阈值、新增边框角点检查、
@@ -40,7 +45,7 @@ rootbox_test/
 │   ├── __init__.py        # 对外 API
 │   ├── config.py          # 全部配置：路径 + 阈值 + 配对规则 + 通知方式
 │   ├── runner.py          # 离线：扫描 + 配对 + 检测 + 终端汇总
-│   ├── verify.py          # 线上：verify_single 单张即检 / verify_pair 成对校验
+│   ├── verify.py          # 线上：verify_single 单图 / verify_pair 单图→成对→拼接→成品复检
 │   ├── checks.py          # 5 类检测实现（+ 可开关的倾斜）
 │   ├── frame.py           # 特征检测：亮金属结构 + LED 光带（自适应阈值）
 │   └── notifier.py        # 通知：file / console / http / multi
@@ -73,28 +78,48 @@ reports = run(r"D:\yy1", write_files=False)           # 只看终端
 支持目录结构（自动识别）：平铺 `n_1.jpg+n_2.jpg` / 单层 `001\1.png+2.png` /
 双层 `类别\001\1.png+2.png` / 根目录无图自动找含图子目录。
 
+> 离线批量默认只做单图+成对检查。若环境已设 `ROOTBOX_QC_STITCH_DIR`，每个通过的
+> 对都会自动拼接并复检（更慢、占磁盘）；只做人工审片时传 `stitch_output_dir=""`
+> 明确关闭。
+
 ## 用法二：线上（拍摄即检，生产用法）
 
-机器拍完一张立即校验，不合格当场重拍该张：
+机器拍完一张立即校验，不合格当场重拍该张；两张都过才拼接，拼接成品再检：
 
 ```python
+import os
+os.environ["ROOTBOX_QC_STITCH_DIR"] = r"D:\data\qc_stitched"       # 生产必须
+os.environ["ROOTBOX_QC_STITCH_SCRIPT"] = r"d:\tupianpj\图片拼接2.py"
+
 from rootbox_qc import verify_single, verify_pair
 from rootbox_qc.config import load_config
 
 cfg = load_config()          # 或用 run 时同一套配置
-rep1 = verify_single(r"D:\data\001\1.png", cfg, attempt=1, input_kind="raw")
-if rep1.recapture_needed:    # fail 和 undetermined 都为 True
-    notify_robot_to_retake(rep1.recapture_targets, rep1.recapture_reasons)
+rep_a = verify_single(r"D:\data\001\1.png", cfg, attempt=1, input_kind="raw")
+if rep_a.recapture_needed:   # fail 和 undetermined 都为 True
+    notify_robot_to_retake(rep_a.recapture_targets, rep_a.recapture_reasons)
     # 重拍后 attempt+1 再检；达到 max_attempts(3) 转人工
-    # rep1.status == "undetermined" 时，告警文案应说明"判不了/需人工确认"，不要当作确定缺陷
+    # rep_a.status == "undetermined" 时，告警文案应说明"判不了/需人工确认"，不要当作确定缺陷
 else:
-    rep2 = verify_single(r"D:\data\001\2.png", cfg, attempt=1, input_kind="raw")
-    rep = verify_pair(r"D:\data\001\1.png", r"D:\data\001\2.png", cfg,
-                      input_kind="raw")
+    rep_b = verify_single(r"D:\data\001\2.png", cfg, attempt=1, input_kind="raw")
+    if rep_b.recapture_needed:
+        notify_robot_to_retake(rep_b.recapture_targets, rep_b.recapture_reasons)
+    else:
+        rep = verify_pair(r"D:\data\001\1.png", r"D:\data\001\2.png", cfg,
+                          attempt=1, input_kind="raw", res_a=rep_a, res_b=rep_b)
+        if rep.recapture_needed:
+            notify_robot_to_retake(rep.recapture_targets, rep.recapture_reasons)
+        else:
+            # 两张单图、成对、拼接成品都通过；未配 stitch_output_dir 时这里会是 None
+            if rep.stitched_status != "pass":
+                raise RuntimeError("拼接成品未通过复检，禁止继续拍摄")
+            continue_next_shot()
 ```
 
 `QCReport.status`：`pass` / `fail` / `undetermined`。JSON 报告同时保留
 `recapture_needed`、`reasons`、`targets` 兼容字段，并新增 `status`。
+成对报告另有 `stitched_status`（`pass` / `fail` / `undetermined` / `None`）、
+`stitched_checks`、`stitch_error`、`stitched_path`。
 
 触发重拍的出口：`notifier.py` 的 HttpNotifier（POST JSON 到小车 REST，标准库实现，
 失败重试但不影响判检）或轮询 `results/recapture_queue.jsonl`（每行一条，
@@ -133,6 +158,46 @@ NOTIFIER = {"type": "multi", "targets": [
 > 是被 80 上限截断/金属排除的固有宽度，23 个命中样本均为误报），而 130~400px 的全部是
 > 金属边框连通域/反光带/机架亮度（检测候选被污染，与失焦无区分度）→ LED 宽度信号
 > 改开关默认停用（`blur_led_check_enabled=False`），模糊判定由 ROI 方差独担。
+
+## 拼接后复检（生产流程，2026-10-29）
+
+`verify_pair(path_a, path_b)` 的执行顺序：
+
+1. A、B 各自跑单图检查（损坏 → 分辨率守卫 → 模糊 → 不全 → 单张错位）。
+2. 任一 `ImageResult.status != "pass"`：立即汇总返回；不做成对错位/重复/锐度
+   比对，也不拼接。
+3. 两张都过：成对错位、重复拍摄、锐度不对称、照度一致性检查。
+4. 成对通过且配置了 `stitch_output_dir`：把内存中的 A/B 送入
+   `stitch_from_qc(img_a, img_b, out_path)`，成品写 `<pair_id>.png`。
+5. 成品按 `input_kind="mosaic"` 重跑损坏/模糊/不全/单张错位，结果写入
+   `stitched_status` / `stitched_checks` / `stitched_path`。
+
+失败语义：
+
+- 成品 `fail`/`undetermined`：整对状态按 `fail > undetermined > pass` 归并，
+  `recapture_needed=True`，`reasons` 带 `[拼接图]` 前缀，
+  `recapture_targets` 指向两张原图（重拍两张再拼）。
+- 成品检查进 `failed_checks` 时带 `scope="stitched"`、`paths=[]`，避免
+  `export_bad_photos.py` 把原图重复登记成“拼接图失败”。
+- 拼接脚本缺失/执行异常：记入 `stitch_error`；要求复检时
+  `stitched_status="undetermined"` 并阻塞，不会静默放行。
+- `verify_stitched=False`：保持旧行为，只暴露错误、不改变质检结论；离线只做
+  单图/成对时可显式关闭。
+- 单张失败或成对失败时不会拼接，也不会追加“未配置 stitch_output_dir”的伪原因。
+
+配置（生产必须）：
+
+```python
+cfg = load_config()
+cfg["paths"]["stitch_script"] = r"d:\tupianpj\图片拼接2.py"   # 需提供 stitch_from_qc
+cfg["paths"]["stitch_output_dir"] = r"D:\data\qc_stitched"
+```
+
+也可在 import 前设 `ROOTBOX_QC_STITCH_DIR` / `ROOTBOX_QC_STITCH_SCRIPT`。
+目录会自动创建，每个通过的对写一个 `<pair_id>.png`。`verify_pair` 默认
+`verify_stitched=None`：只有配置了目录才复检；`path_b=None` 的单张不拼接
+（`stitched_status=None`），离线扫散图不会因此被判失败。`run()` 未配置时启动会
+warning，提示当前只做了单图+成对检查。
 
 ## 关于"模糊"（2026-10-29 现行 C 刀口）
 
@@ -322,6 +387,10 @@ y_bot 0.912~0.944），导致 8/8 对照原图被"不全"误判（007 y_bot=0.91
 5. **刀口/布局跟随相机角度**：默认 C；旧角度批次用 `layout="A"` 或 `"B"`。
    换角度必须重新测刀口并整套切换（模糊存活列、单张缝位、固定缝窗），
    只改 `blur_strip_cuts` 会让另外两类判据错位。
+6. **拼接器与拼接后复检**：生产必须同时配置 `paths.stitch_script`（提供
+   `stitch_from_qc(img_a, img_b, out_path)`）和 `paths.stitch_output_dir`；
+   上线前用真实一对图跑通 `verify_pair`，确认 `stitched_status="pass"`。未配目录时
+   只完成单图+成对检查，不满足“拼接后复检再继续拍摄”的流程。
 
 ## 用法三：导出坏图（筛选 + 整夹分类剪切）
 
@@ -363,9 +432,13 @@ rootbox_qc）。目标机需装 Python 3.9+，且 `pip install -r requirements.t
 
 ```bash
 python scripts/smoke_test.py       # 合成图全链路：期望 SMOKE OK
-python scripts/opt_test.py         # 五类信号/复用/刀口/三态：期望 ALL PASS
+python scripts/opt_test.py         # 五类信号/复用/刀口/三态/拼接复检：期望 ALL PASS
 python scripts/regression_5472.py  # 5472 横/竖图 + 真实锚点：期望 11/11 PASS
 ```
+
+`opt_test.py` 第 9 节用 `fake_stitch_good/black/raise.py` 覆盖拼接成品通过、
+成品缺陷阻塞、拼接异常、关闭复检、单图失败短路、缺目录等分支；真实拼接器仍需
+用现场一对正常图手工跑一次 `verify_pair` 确认可产出且 `stitched_status="pass"`。
 
 `regression_5472.py` 只读 `D:\rootguard\data` 的少量锚点（正常 917/915/912、
 模糊 007~010），不会改动数据；换机器用 `--data` 指定数据根目录。
@@ -379,8 +452,11 @@ python scripts/regression_5472.py  # 5472 横/竖图 + 真实锚点：期望 11/
 | 扫描到 0 对 | 检查 INPUT_DIR；也可设环境变量 `ROOTBOX_QC_INPUT_DIR` |
 | 好图全被标模糊 | 先看报告 `input_kind`/`layout` 是否与画幅匹配（不匹配应报 undetermined，而不是模糊）；再核对 1/2 号角色和 C 刀口，最后才动 `blur_strip_alive_var_min` |
 | 提示"分辨率 ... 不是 5472x3648" | 输入被裁剪/缩放，或换了相机；改 `expected_width/expected_height` 并重标刀口，不要直接关守卫 |
+| `stitched_status` 是 `None` | 没配 `stitch_output_dir`，只做了单图+成对检查；生产设 `ROOTBOX_QC_STITCH_DIR`，离线人工审片可忽略 |
+| 拼接图判 `fail/undetermined` | 看报告 `stitched_checks` / `stitch_error`；成品问题会阻塞整对并指向两张原图，先排查拼接器输出、分辨率与 C 刀口 |
+| 拼接后每对都变慢/占磁盘 | 每个通过的对都会写 `<pair_id>.png` 并多跑一遍检查；离线只审片传 `stitch_output_dir=""` 关闭 |
 | 好图全被标倾斜 | 上调 `tilt_angle_max_deg`（旧值 8.714 经 D:\yy1 调优） |
-| 大图跑得慢 | 本机实测 5472×3648 单张约 0.8~1.5s、成对约 1.8~3.2s；线上可用 `align_orb_downscale` 调大提速 |
+| 大图跑得慢 | 本机实测 5472×3648 单张约 0.8~1.5s、成对约 1.8~3.2s（不含拼接）；线上可用 `align_orb_downscale` 调大提速 |
 
 ## 日志
 

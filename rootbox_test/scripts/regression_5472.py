@@ -27,7 +27,7 @@ from rootbox_qc.runner import ensure_utf8_console  # noqa: E402
 ensure_utf8_console()
 
 W, H = 5472, 3648
-OUT = tempfile.mkdtemp(prefix="rootbox_5472_")
+OUT = os.environ.get("ROOTBOX_TEST_OUT") or tempfile.mkdtemp(prefix="rootbox_5472_")
 rng = np.random.default_rng(20261029)
 RESULTS: list[tuple[str, bool, str]] = []
 

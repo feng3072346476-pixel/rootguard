@@ -22,7 +22,7 @@ ensure_utf8_console()
 from rootbox_qc import verify_single, verify_pair  # noqa: E402
 
 W, H = 1200, 1600          # 合成图尺寸（宽 x 高）
-OUT = tempfile.mkdtemp(prefix="rootbox_smoke_")
+OUT = os.environ.get("ROOTBOX_TEST_OUT") or tempfile.mkdtemp(prefix="rootbox_smoke_")
 
 # 合成图不是 5472×3648，关闭分辨率守卫（生产默认开启，非标尺寸判 undetermined）。
 # 合成图没有"底部金属长边"结构，长边判据会判 undetermined；该判据由 opt_test 的

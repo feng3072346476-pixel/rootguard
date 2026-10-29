@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 from rootbox_qc import checks, frame as frame_mod
 from rootbox_qc.config import load_config
 
-OUT = tempfile.mkdtemp(prefix="rootbox_opt_")
+OUT = os.environ.get("ROOTBOX_TEST_OUT") or tempfile.mkdtemp(prefix="rootbox_opt_")
 rng = np.random.default_rng(1)
 W, H = 1200, 1600
 
@@ -270,6 +270,104 @@ try:
           rep_guard.status == "undetermined" and rep_guard.recapture_needed
           and any("分辨率" in r for r in rep_guard.recapture_reasons),
           (rep_guard.status, rep_guard.recapture_reasons[:1]))
+
+    print("== 9. 拼接后复检：单图先过 -> 拼接 -> 平铺图复检 ==")
+    stitch_dir = os.path.join(OUT, "stitch_out")
+    os.makedirs(stitch_dir, exist_ok=True)
+    good_stitch = os.path.join(OUT, "fake_stitch_good.py")
+    bad_stitch = os.path.join(OUT, "fake_stitch_black.py")
+    raise_stitch = os.path.join(OUT, "fake_stitch_raise.py")
+    with open(good_stitch, "w", encoding="utf-8") as _f:
+        _f.write("import cv2\ndef stitch_from_qc(a,b,out):\n"
+                 "    cv2.imwrite(out, a)\n    return out\n")
+    with open(bad_stitch, "w", encoding="utf-8") as _f:
+        _f.write("import cv2, numpy as np\ndef stitch_from_qc(a,b,out):\n"
+                 "    cv2.imwrite(out, np.zeros_like(a))\n    return out\n")
+    with open(raise_stitch, "w", encoding="utf-8") as _f:
+        _f.write("def stitch_from_qc(a,b,out):\n"
+                 "    raise RuntimeError('fake stitch failure')\n")
+
+    th_flow = dict(th)
+    th_flow["completeness_longedge_check_enabled"] = False
+    # 同一场景、不同照明状态、水平错开 10px：单图都清晰，成对既不判重复也不判错位。
+    _flow_a = scene(0).astype(np.float32)
+    _flow_b = scene(10).astype(np.float32)
+    flow_a = save("flow_a.png", np.clip(_flow_a - grad + 30, 0, 255).astype(np.uint8))
+    flow_b = save("flow_b.png", np.clip(_flow_b + grad + 30, 0, 255).astype(np.uint8))
+    flow_cfg = {"thresholds": th_flow,
+                "paths": {"stitch_output_dir": stitch_dir,
+                          "stitch_script": good_stitch}}
+    # 离线扫描散图时 path_b=None；即使配了 stitch_output_dir / verify_stitched=True，
+    # 也没有可拼接的另一半，不能因此判“未产出拼接成品”。
+    rep_single = verify_pair(flow_a, None, flow_cfg, verify_stitched=True)
+    check("单张不拼接、也不因缺少另一半判失败",
+          rep_single.status == "pass" and not rep_single.recapture_needed
+          and rep_single.stitched_status is None,
+          (rep_single.status, rep_single.stitched_status, rep_single.recapture_reasons))
+
+    rep_flow = verify_pair(flow_a, flow_b, flow_cfg)
+    check("两张单图通过后自动拼接并复检成品",
+          rep_flow.stitched_path is not None and rep_flow.stitched_status == "pass"
+          and not rep_flow.recapture_needed,
+          (rep_flow.stitched_status, rep_flow.stitch_error))
+    check("拼接成品检查明细写入报告",
+          any(c["name"] == "blur" for c in rep_flow.stitched_checks),
+          [c["name"] for c in rep_flow.stitched_checks])
+
+    flow_bad_cfg = {"thresholds": th_flow,
+                    "paths": {"stitch_output_dir": stitch_dir,
+                              "stitch_script": bad_stitch}}
+    rep_bad = verify_pair(flow_a, flow_b, flow_bad_cfg)
+    check("拼接成品为黑图时判失败并阻塞放行",
+          rep_bad.stitched_status == "fail" and rep_bad.recapture_needed
+          and any("[拼接图]" in r for r in rep_bad.recapture_reasons),
+          rep_bad.recapture_reasons[-1:])
+    check("拼接成品失败时重拍目标指向两张原图",
+          set(rep_bad.recapture_targets) == {flow_a, flow_b}, rep_bad.recapture_targets)
+    exp_bad = collect_failures(rep_bad)
+    check("拼接成品缺陷不把原图误登记为坏图",
+          exp_bad[flow_a]["hits"] == [] and exp_bad[flow_b]["hits"] == [], exp_bad)
+
+    flow_raise_cfg = {"thresholds": th_flow,
+                      "paths": {"stitch_output_dir": stitch_dir,
+                                "stitch_script": raise_stitch}}
+    rep_raise = verify_pair(flow_a, flow_b, flow_raise_cfg, verify_stitched=True)
+    check("要求复检但拼接抛异常时按 undetermined 阻塞",
+          rep_raise.stitched_status == "undetermined"
+          and rep_raise.recapture_needed and "fake stitch failure" in (rep_raise.stitch_error or ""),
+          (rep_raise.stitched_status, rep_raise.stitch_error))
+    rep_raise_off = verify_pair(flow_a, flow_b, flow_raise_cfg, verify_stitched=False)
+    check("关闭拼接复检时保持旧行为（只暴露 stitch_error）",
+          rep_raise_off.stitched_status is None and not rep_raise_off.recapture_needed
+          and "fake stitch failure" in (rep_raise_off.stitch_error or ""),
+          (rep_raise_off.stitched_status, rep_raise_off.stitch_error))
+
+    flow_soft = save("flow_soft.png", cv2.GaussianBlur(scene(0), (0, 0), 9))
+    rep_short = verify_pair(flow_soft, flow_b, flow_cfg)
+    check("单图未过时短路，不做成对比对/拼接",
+          rep_short.recapture_needed and rep_short.alignment_pair is None
+          and rep_short.stitched_path is None,
+          (rep_short.status, rep_short.alignment_pair, rep_short.stitched_path))
+
+    rep_nodir = verify_pair(flow_a, flow_b, {"thresholds": th_flow}, verify_stitched=True)
+    check("要求复检但未配置拼接目录时判 undetermined",
+          rep_nodir.stitched_status == "undetermined"
+          and any("未配置" in r for r in rep_nodir.recapture_reasons),
+          rep_nodir.recapture_reasons)
+    check("判不了的原因只带一层前缀",
+          sum(r.count("无法判定：") for r in rep_nodir.recapture_reasons) == 1,
+          rep_nodir.recapture_reasons)
+
+    # 成对检查已经失败时，不应再补一条“没配拼接目录”的伪原因。
+    flow_mis = save("flow_mis.png", np.clip(scene(350).astype(np.float32) - grad + 30,
+                                            0, 255).astype(np.uint8))
+    rep_mis_nodir = verify_pair(flow_a, flow_mis, {"thresholds": th_flow},
+                                verify_stitched=True)
+    check("成对已失败时不追加缺少拼接目录的伪原因",
+          rep_mis_nodir.recapture_needed and rep_mis_nodir.stitched_status is None
+          and not any("未配置" in r for r in rep_mis_nodir.recapture_reasons),
+          (rep_mis_nodir.status, rep_mis_nodir.stitched_status,
+           rep_mis_nodir.recapture_reasons[-1:]))
 
     print()
     print("ALL PASS" if ok_all else "SOME FAILED")

@@ -2,7 +2,12 @@
 
 线上（拍摄即检）接口：
     verify_single(path, config_or_thresholds)  # 拍完一张立即校验，不合格当场重拍该张
-    verify_pair(path_a, path_b, ...)           # 两张灯照都拍完后再校验（含错位比对）
+    verify_pair(path_a, path_b, ...)           # 两张单图 -> 成对 -> 拼接 -> 成品复检
+
+生产流程（2026-10-29 确认）：两张单图任一未过立即返回，不拼接；两张都过后才做
+成对比对，再按 paths.stitch_script 拼接，并对成品按 mosaic 重跑一遍单图检查。
+配置 paths.stitch_output_dir（或环境变量 ROOTBOX_QC_STITCH_DIR）才启用成品复检；
+verify_stitched=True 可强制要求，缺少目录/成品按 undetermined 阻塞。
 
 离线（批量）接口：
     run(input_dir, ...)                        # 扫描目录，见 runner.py
@@ -66,7 +71,9 @@ class QCReport:
     escalate_manual: bool = False     # attempt >= max_attempts 且仍不合格时转人工/停机
     systemic_alert: str | None = None # 连续多组命中同类故障时的系统性熔断告警
     stitched_path: str | None = None  # 质检通过后内存直传无缝拼接的输出路径（若启用）
-    stitch_error: str | None = None   # 拼接脚本缺失/执行失败时的明确错误（不影响质检结论）
+    stitch_error: str | None = None   # 拼接脚本缺失/执行失败时的明确错误
+    stitched_status: str | None = None  # 拼接成品复检的三态；None=未启用/未执行
+    stitched_checks: list = field(default_factory=list)  # 拼接成品上的单图检查明细
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S"))
 
     def to_dict(self) -> dict:
@@ -298,15 +305,23 @@ def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
                 pair_id: str | None = None, attempt: int = 1,
                 input_kind: str | None = None,
                 stitch_output_dir: str | None = None,
+                verify_stitched: bool | None = None,
                 res_a: ImageResult | QCReport | None = None,
                 res_b: ImageResult | QCReport | None = None) -> QCReport:
-    """两张灯照成对校验：各自单图检查 + 两张间错位比对。
+    """两张灯照成对校验：单图先过 -> 成对比对 -> 拼接 -> 拼接成品复检。
 
     线上已调过 verify_single(path_a) / verify_single(path_b) 时，可将返回报告传入
     res_a / res_b 直接复用单图检查结果，避免重复计算单图卷积与连通域。
-    若提供 stitch_output_dir（或在 cfg.paths.stitch_output_dir 中配置），当成对原图质检
-    全部通过时，直接将内存中已解码的 img_a/img_b 传入 cfg.paths.stitch_script 指向的
-    无缝拼接器生成 <pair_id>.png；脚本缺失或执行失败时记入 report.stitch_error。
+
+    生产流程（2026-10-29 确认）：两张单图任一未通过时立即返回，不再做成对比对/拼接；
+    两张都通过后才比对，随后将内存中的 img_a/img_b 送入 cfg.paths.stitch_script 拼接，
+    并对 <pair_id>.png 按 mosaic 再跑一遍单图检查（模糊/不全/单图错位/损坏）。
+    拼接成品未通过时，report.status 置为 fail/undetermined，重拍目标指向两张原图。
+
+    verify_stitched: True/False 强制开关；None（默认）时，只要配置了 stitch_output_dir
+    就复检。拼接脚本缺失/执行失败时记入 stitch_error；要求复检时按 undetermined 阻塞，
+    不要求复检时保持旧行为（只暴露错误，不改变质检结论）。path_b=None（单张）不拼接，
+    stitched_status 恒为 None，避免离线扫散图时误判“未产出成品”。
     """
     cfg = _as_cfg(cfg)
     th = dict(get_thresholds(cfg))
@@ -336,6 +351,9 @@ def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
             prev_b = None
         report.images.append(prev_b if prev_b is not None
                              else _run_single_checks(path_b, img_b, gray_b, frame_b, th))
+        if any(r.status != "pass" for r in report.images):
+            _collect_report(report, path_b)
+            return report
         if img_a is not None and img_b is not None:
             pair = None
             try:
@@ -366,16 +384,57 @@ def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
 
     _collect_report(report, path_b)
     eff_stitch_dir = stitch_output_dir or (cfg.get("paths") or {}).get("stitch_output_dir")
+    eff_verify = bool(eff_stitch_dir) if verify_stitched is None else bool(verify_stitched)
+    if path_b is None:
+        # 单张没有可拼接的另一半；离线扫描散图时不能因此判“未产出拼接成品”。
+        eff_verify = False
+    stitch_script = (cfg.get("paths") or {}).get("stitch_script")
+
     if (eff_stitch_dir and not report.recapture_needed
             and path_b is not None and img_a is not None and img_b is not None):
-        stitch_script = (cfg.get("paths") or {}).get("stitch_script")
         try:
             report.stitched_path = _stitch_in_memory(
                 img_a, img_b, report.pair_id, eff_stitch_dir, stitch_script)
-        except Exception as e:  # noqa: BLE001 —— 拼接失败不改变质检结论，但必须显式暴露
+        except Exception as e:  # noqa: BLE001 —— 显式暴露，是否阻塞由 verify_stitched 决定
             report.stitch_error = f"无缝拼接失败: {e}"
             logger.error("%s pair=%s", report.stitch_error, report.pair_id)
+
+    if eff_verify:
+        if report.stitched_path:
+            _check_stitched(report, cfg, th)
+        elif report.stitch_error:
+            # 要求“拼接后复检”但拼接没产出：不能当通过放行，按判不了阻塞。
+            report.stitched_status = "undetermined"
+            report.stitched_checks = [checks._undetermined(
+                "stitch", {}, {}, report.stitch_error)]
+        elif not report.recapture_needed:
+            # 成对检查已通过却没有产出拼接图：缺目录或缺少 path_b 都不能静默放行。
+            reason = ("要求复检拼接图，但未配置 stitch_output_dir"
+                      if eff_stitch_dir is None
+                      else "要求复检拼接图，但未产出拼接成品")
+            report.stitched_status = "undetermined"
+            report.stitched_checks = [checks._undetermined("stitch", {}, {}, reason)]
+        _collect_report(report, path_b)
     return report
+
+
+def _check_stitched(report: QCReport, cfg: dict, th: dict) -> None:
+    """对拼接成品按 mosaic 模态跑一遍单图检查，结果写回 report。"""
+    try:
+        img, gray, frame = _prepare(report.stitched_path, cfg)
+    except Exception as e:  # noqa: BLE001
+        report.stitched_status = "fail"
+        report.stitched_checks = [checks._fail(
+            "stitch", {}, {}, f"拼接成品读取异常: {e}")]
+        return
+    sth = dict(th)
+    sth["input_kind"] = "mosaic"
+    res = _run_single_checks(report.stitched_path, img, gray, frame, sth)
+    report.stitched_checks = list(res.checks)
+    report.stitched_status = res.status
+    if res.load_error:
+        report.stitched_checks.insert(0, checks._fail(
+            "corruption", {}, {}, f"拼接成品损坏({res.load_error})"))
 
 
 def _collect_report(report: QCReport, path_b: str | None) -> None:
@@ -430,6 +489,28 @@ def _collect_report(report: QCReport, path_b: str | None) -> None:
 
     # 照明异常需整对重拍（灯管/曝光问题，两张都不可用）
     add_pair(report.illumination_pair, pair_paths)
+
+    # 拼接成品复检：成品不过同样阻塞放行，重拍目标指向两张原图。
+    if report.stitched_status and report.stitched_status != "pass":
+        failed = []
+        for c in report.stitched_checks:
+            st = c.get("status", "pass" if c["passed"] else "fail")
+            if st == "pass":
+                continue
+            # 整条拼接结论是 undetermined 时由 add_reason 统一加前缀；
+            # 只有整体已 fail 的混合场景才需要给单条 undetermined 加前缀。
+            prefix = ("无法判定：" if st == "undetermined"
+                      and report.stitched_status == "fail" else "")
+            text = c["reason"]
+            if prefix and text.startswith(prefix):
+                text = text[len(prefix):]
+            failed.append(prefix + text)
+        if failed:
+            add_reason(report.stitched_status, "[拼接图] " + "；".join(failed),
+                       pair_paths)
+        else:
+            add_reason(report.stitched_status, "[拼接图] 拼接成品复检未通过",
+                       pair_paths)
 
     if "fail" in states:
         report.status = "fail"
@@ -511,6 +592,14 @@ def failed_checks(report: QCReport) -> list:
         out.append({"name": name, "category": category_of(name), "scope": "pair",
                     "paths": paths, "status": res.get("status", "fail"),
                     "reason": res["reason"]})
+
+    # 拼接成品上的问题：单独 scope；paths 留空，避免离线导出把原图误判为坏图。
+    for c in getattr(report, "stitched_checks", []) or []:
+        if c["passed"]:
+            continue
+        out.append({"name": c["name"], "category": category_of(c["name"]),
+                    "scope": "stitched", "paths": [],
+                    "status": c.get("status", "fail"), "reason": c["reason"]})
     return out
 
 

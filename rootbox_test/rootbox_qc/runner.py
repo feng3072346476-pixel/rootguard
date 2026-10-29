@@ -389,6 +389,10 @@ def run(
                 f"启用了 stitch_output_dir={stitch_dir!r}，但无缝拼接脚本不存在: "
                 f"{stitch_script!r}（配置 paths.stitch_script 或环境变量 "
                 "ROOTBOX_QC_STITCH_SCRIPT）")
+    else:
+        logger.warning(
+            "未配置 paths.stitch_output_dir：只做单图+成对检查，不执行拼接后复检；"
+            "生产流程要求配置 ROOTBOX_QC_STITCH_DIR（离线只看单图/成对可忽略）")
 
     ensure_utf8_console()
     setup_logging(paths.get("log_dir"))
