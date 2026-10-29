@@ -48,11 +48,17 @@ PAIRING = {
 }
 
 # ============================================================================
-# 产线拼接刀口配置（原图 px @5472 宽；图1=[0,c1)∪[c2,c3)，图2=[c1,c2)∪[c3,W)）
-#   B 线（现行 dataed 平图）：1950 / 2500 / 3050
-#   A 线（旧 data 池平图）  ：2000 / 2700 / 3300
+# 产线拼接刀口配置（原图 px @5472 宽；图1 存活列=[c1,c2)∪[c3,W)，图2 存活列=[0,c1)∪[c2,c3)）
+#   C 线（现行，2026-10-29 起）：2200 / 2780 / 3300
+#   B 线（旧 dataed 平图）    ：1950 / 2500 / 3050
+#   A 线（旧 data 池平图）    ：2000 / 2700 / 3300
+#
+# 注意：data 里混有两套相机角度，C 只对应现行角度；旧角度图用 layout="A"/"B"
+# 显式切换整套刀口（模糊存活列、单张缝位、固定缝窗一起变），不要只改
+# blur_strip_cuts，否则单张错位仍按 C 找缝。等现场角度统一后只保留 C。
 # ============================================================================
 MOSAIC_LAYOUTS = {
+    "C": (2200, 2780, 3300),
     "B": (1950, 2500, 3050),
     "A": (2000, 2700, 3300),
 }
@@ -63,8 +69,15 @@ MOSAIC_LAYOUTS = {
 THRESHOLDS = {
     # 输入图类型："auto"（默认，兼容原图与成品图混合扫描）| "raw"（相机原图：跳过单张拼缝检查）
     #           | "mosaic"（拼接成品平图：跳过原图存活列模糊判定）
+    # 线上拍摄即检必须显式传 input_kind="raw"；auto 只用于离线混合目录。
     "input_kind": "auto",
     "auto_rotate_landscape": True,
+
+    # 分辨率守卫：现行相机原图 5472×3648（竖拍旋转后同样落到这个尺寸）。
+    # 非该尺寸不缩放刀口、不硬猜 input_kind，直接判"无法判定"并默认重拍。
+    "resolution_guard_enabled": True,
+    "expected_width": 5472,
+    "expected_height": 3648,
 
     # ----- 1. 图片损坏（单张 + 成对单灯管照明） -----
     "corruption_min_filesize": 100_000,      # 字节下限；过小视为未完整写入/损坏
@@ -87,7 +100,10 @@ THRESHOLDS = {
     "blur_strip_check_enabled": True,
     "blur_strip_alive_var_min": 46.0,        # 角色对应的反光侧存活列 Laplacian 方差下限
     "blur_strip_surviving_var_min": 26.5,    # 角色对应的无反光取片列 Laplacian 方差下限
-    "blur_strip_cuts": [2000, 2700, 3300],
+    # layout=None 表示按现行 C 线；切旧角度时设 layout="A"/"B"，整套刀口一起切。
+    # blur_strip_cuts 仅作为自定义覆盖：layout 非空时以 layout 为准。
+    "layout": None,
+    "blur_strip_cuts": [2200, 2780, 3300],
 
     # 成对模糊（一张锐一张糊：灯照拖影/轻微失焦）
     "blur_pair_check_enabled": True,

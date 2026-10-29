@@ -248,8 +248,10 @@ def _categories_of(report: "QCReport") -> set:
 
 def _print_summary(reports: list, elapsed: float, output_dir: str | None):
     n = len(reports)
-    n_fail = sum(1 for r in reports if r.recapture_needed)
-    n_pass = n - n_fail
+    n_fail = sum(1 for r in reports if getattr(r, "status", "fail") == "fail")
+    n_undet = sum(1 for r in reports if getattr(r, "status", "") == "undetermined")
+    n_pass = n - n_fail - n_undet
+    n_recap = n_fail + n_undet
     n_escalate = sum(1 for r in reports if getattr(r, "escalate_manual", False))
     n_alert = sum(1 for r in reports if getattr(r, "systemic_alert", None))
 
@@ -259,7 +261,10 @@ def _print_summary(reports: list, elapsed: float, output_dir: str | None):
     print(f"{'=' * 60}")
     print(f"  总组数 : {BOLD}{n}{RESET}")
     print(f"  通过   : {GREEN}{n_pass}{RESET}")
-    print(f"  需重拍 : {RED if n_fail else GREEN}{n_fail}{RESET}")
+    print(f"  确定失败: {RED if n_fail else GREEN}{n_fail}{RESET}")
+    if n_undet:
+        print(f"  判不了 : {YELLOW}{n_undet}{RESET}（按重拍处理）")
+    print(f"  需重拍 : {RED if n_recap else GREEN}{n_recap}{RESET}")
     if n_escalate:
         print(f"  转人工 : {YELLOW}{n_escalate}{RESET}")
     if n_alert:
@@ -311,13 +316,15 @@ def _build_exception_report(pair_id: str, pa: str, pb: str | None,
         if p:
             imgs.append(ImageResult(
                 path=p,
-                checks=[{"name": "corruption", "passed": False, "reason": reason,
+                checks=[{"name": "corruption", "passed": False, "status": "fail",
+                         "reason": reason,
                          "metric": {"exception": type(err).__name__}}],
                 load_error=reason,
             ))
             targets.append(p)
     return QCReport(
         pair_id=pair_id,
+        status="fail",
         recapture_needed=True,
         recapture_reasons=[f"[异常] {reason}"],
         recapture_targets=targets,

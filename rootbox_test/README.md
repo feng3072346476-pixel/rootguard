@@ -6,6 +6,27 @@
 另内置兼容的**倾斜**检查（`tilt_check_enabled` 开关，默认关闭——bigbox 线相机固定、
 根盒不移动，物理上无触发条件，仅相机可移动/箱体人工摆放的现场启用）。
 
+## 2026-10-29 现行配置（先读）
+
+- **产线刀口 C = 2200 / 2780 / 3300**（原图 px @5472 宽），已写入
+  `config.py:THRESHOLDS["blur_strip_cuts"]`；`layout=None` 默认走 C。
+  旧批次用 `layout="A"`（2000/2700/3300）或 `layout="B"`（1950/2500/3050）
+  显式切换**整套**刀口（模糊存活列 + 单张缝位 + 固定缝窗一起变），不要只改
+  `blur_strip_cuts`。`layout` 只认 A/B/C，不做按文件名自动路由。
+- **三态**：报告新增 `status = pass | fail | undetermined`。判不了（分辨率不符、
+  刀口/画幅不匹配、角色不明、长边结构不可用）记 `undetermined`，仍置
+  `recapture_needed=True`；到 `max_attempts` 仍判不了则 `escalate_manual=True`。
+  `passed` 仅表示 `status=="pass"`，消费方不要再把 `passed=False` 一律当确定缺陷。
+- **线上成对必须 raw**：`verify_pair(path_a, path_b, ...)` 只要给了 `path_b`，
+  内部强制 `input_kind="raw"`；`verify_single` 线上也应显式传
+  `input_kind="raw"`。`auto` 只用于离线混合目录，且单图猜出的模态不会被
+  成对阶段复用（`input_kind` 不一致会重算）。
+- **分辨率守卫**：默认只接受 5472×3648（竖拍自动旋转后同尺寸）。其他尺寸不缩放
+  刀口、不猜模态，直接 `undetermined` + 重拍。换相机/换分辨率必须同时改
+  `expected_width/expected_height` 并重新标定刀口。
+- **竖拍修复**：`load_image` 旋转后，损坏检查的"解码尺寸 vs 文件头"核对接受
+  转置尺寸，不再把竖拍原图误报"疑似文件截断"。
+
 > 原代码备份：`_backup_20260904/`（未动，可对照/回滚）
 > 旧版改造说明：修复 LED 检测失效、接线未生效阈值、新增边框角点检查、
 > 错位改用特征匹配、新增线上单张接口、HTTP 通知器标准库实现。
@@ -14,7 +35,7 @@
 
 ```
 rootbox_test/
-├── main.py                # 离线批量入口（扫描目录，改 INPUT_DIR 即可）
+├── main.py                # 离线批量入口（ROOTBOX_QC_INPUT_DIR 或 config.paths.input_dir）
 ├── rootbox_qc/            # 代码包
 │   ├── __init__.py        # 对外 API
 │   ├── config.py          # 全部配置：路径 + 阈值 + 配对规则 + 通知方式
@@ -25,6 +46,8 @@ rootbox_test/
 │   └── notifier.py        # 通知：file / console / http / multi
 ├── scripts/
 │   ├── smoke_test.py          # 合成图自检（改完代码先跑它）
+│   ├── opt_test.py            # 五类信号/架构专项验证（合成图）
+│   ├── regression_5472.py     # 真实画幅回归：分辨率守卫/竖拍旋转/C 刀口
 │   ├── export_bad_photos.py   # 按问题类型导出坏图（原图+拼接图）
 │   └── export_bad_photos.bat  # 其双击启动器（Windows，独立部署用）
 └── results/               # 报告 + 重拍队列 + 日志
@@ -39,7 +62,7 @@ pip install -r requirements.txt
 ## 用法一：离线批量（人工审片）
 
 ```python
-# main.py 改 INPUT_DIR 后直接运行；或：
+# 设置 ROOTBOX_QC_INPUT_DIR，或改 config.py 的 paths.input_dir；或：
 from rootbox_qc import run
 
 reports = run(r"D:\yy1")                              # 终端打印 + results/ 报告 + 重拍队列
@@ -59,14 +82,19 @@ from rootbox_qc import verify_single, verify_pair
 from rootbox_qc.config import load_config
 
 cfg = load_config()          # 或用 run 时同一套配置
-rep1 = verify_single(r"D:\data\001\1.png", cfg, attempt=1)
-if rep1.recapture_needed:
+rep1 = verify_single(r"D:\data\001\1.png", cfg, attempt=1, input_kind="raw")
+if rep1.recapture_needed:    # fail 和 undetermined 都为 True
     notify_robot_to_retake(rep1.recapture_targets, rep1.recapture_reasons)
     # 重拍后 attempt+1 再检；达到 max_attempts(3) 转人工
+    # rep1.status == "undetermined" 时，告警文案应说明"判不了/需人工确认"，不要当作确定缺陷
 else:
-    rep2 = verify_single(r"D:\data\001\2.png", cfg, attempt=1)
-    rep = verify_pair(r"D:\data\001\1.png", r"D:\data\001\2.png", cfg)
+    rep2 = verify_single(r"D:\data\001\2.png", cfg, attempt=1, input_kind="raw")
+    rep = verify_pair(r"D:\data\001\1.png", r"D:\data\001\2.png", cfg,
+                      input_kind="raw")
 ```
+
+`QCReport.status`：`pass` / `fail` / `undetermined`。JSON 报告同时保留
+`recapture_needed`、`reasons`、`targets` 兼容字段，并新增 `status`。
 
 触发重拍的出口：`notifier.py` 的 HttpNotifier（POST JSON 到小车 REST，标准库实现，
 失败重试但不影响判检）或轮询 `results/recapture_queue.jsonl`（每行一条，
@@ -86,9 +114,9 @@ NOTIFIER = {"type": "multi", "targets": [
 | 类型 | 信号 | 默认阈值（config.py） |
 |------|------|-----------|
 | 损坏 | 文件大小 / 文件头魔数 / 解码失败 / 近纯色 / 解码尺寸与文件头核对（截断） | `<100KB`；体积归一 `≥5000B/MP`；`gray_std≥15.0`（熵指标只记录不判定） |
-| 模糊 | 亮区 ROI 拉普拉斯方差（单张兜底）＋ 拼接存活列 Laplacian 方差（`blur_strip_alive_var_min`，角色感知主判据）＋ **成对锐度不对称**（`blur_pair_*`，2026-09-24 新增，抓单张阈值抓不到的"一张拖影一张正常"）＋ LED 边缘弥散宽度（`blur_edge_check_enabled`，停用） | 存活列 var `≥46`；成对：糊图亮区 var `≤25.5` 且两张比值 `≥2.2`；单张 ROI var `≥20`；边缘 10~90% 宽度 `≤12px`（启用时生效） |
+| 模糊 | 亮区 ROI 拉普拉斯方差（单张兜底）＋ 拼接存活列 Laplacian 方差（`blur_strip_alive_var_min`，角色感知主判据，现行 C 刀口 2200/2780/3300）＋ **成对锐度不对称**（`blur_pair_*`，2026-09-24 新增，抓单张阈值抓不到的"一张拖影一张正常"）＋ LED 边缘弥散宽度（`blur_edge_check_enabled`，停用） | 存活列 var `≥46`；成对：糊图亮区 var `≤25.5` 且两张比值 `≥2.2`；单张 ROI var `≥20`；边缘 10~90% 宽度 `≤12px`（启用时生效）；刀口与画幅不匹配或角色不明 → `undetermined` |
 | 倾斜 | 亮金属外接矩形角度（亮区占比异常时跳过判定；`tilt_check_enabled` 开关） | `≤8.714°`（bigbox 线相机固定、根盒不移动，物理上无触发条件，已关闭；仅相机可移动/箱体人工摆放现场启用） |
-| 不全 | **底部金属长边结构缺失**（2026-10-12 口径"必须拍全当前根盒"：完整根盒底部长边强带必在 y≥0.85 区出现，无强带且图不暗 = 下侧被裁；**缝台阶豁免**：自适应缝组 ≥3 条（与错位单张判据同源）判为拼缝错位伪影、不判不全）/ 亮像素占比 / 凸包面积 / 外接矩形角点越界（可开关）/ 边框归一化位置 `frame_bbox`（始终记录；配 `completeness_expected_bounds` 后按机位基准判定） | 底部区挺直度峰值 `≥0.25`（暗图守卫：全图均值 `≥65` 才判）；占比 `≤30%`；角距边 `≥2%`；机位基准偏离 `≤2%` |
+| 不全 | **底部金属长边结构缺失**（2026-10-12 口径"必须拍全当前根盒"：完整根盒底部长边强带必在 y≥0.85 区出现，无强带且图不暗 = 下侧被裁；**缝台阶豁免**：自适应缝组 ≥3 条（与错位单张判据同源）判为拼缝错位伪影、不判不全）/ 亮像素占比 / 凸包面积 / 外接矩形角点越界（可开关）/ 边框归一化位置 `frame_bbox`（始终记录；配 `completeness_expected_bounds` 后按机位基准判定） | 底部区挺直度峰值 `≥0.25`（暗图守卫：全图均值 `≥65` 才判）；占比 `≤30%`；角距边 `≥2%`；机位基准偏离 `≤2%`；找不到长边或画面过暗 → `undetermined` |
 | 错位 | **区域带相位位移**（`alignment_band_*`，2026-09-24 新增主判据：上/中/下三条带各跑相位相关取 \|dy\| 中位，只测箱体内容不被固定背景稀释）＋ 两图 ORB 特征匹配（平移/旋转/缩放/内点率）＋ 相位相关独立印证（防 RANSAC 退化解）；亮区质心兜底 | 区域带 `≤15px`（2026-09-24 由用户裁定从 40 降到 35；2026-09-29 再裁定降到 15——dataed 全量回归 430 单元 417 无变化、13 单元新增错位命中 15.1~28.4px，均已落地）；位移 `≤400px`；旋转 `≤2°`；缩放差 `≤5%`；内点率 `≥10%`；特征/相位位移差 `≤150px`；配 `alignment_expected_shift_px` 后按"偏离设计走位"判定 |
 | 重复拍摄 | 文件字节完全相同（零误报强信号）/ **低频照明差**（主信号，"两次拍摄照明状态相同"的定义式，缩 200px 宽＋高斯模糊后作差，对箱体微移的边缘错位免疫）/ 特征内点率＋位移；任一命中即判 | 低频照明差 `≤10`（全池标定：同光照 ≤4.5、不同光照 ≥19.1）；内点率 `≥95%` 且位移 `≤5px`；独立类别，2026-09-09 从错位拆出，2026-09-24 主信号由原始 MAE 换为低频照明差 |
 
@@ -106,57 +134,27 @@ NOTIFIER = {"type": "multi", "targets": [
 > 金属边框连通域/反光带/机架亮度（检测候选被污染，与失焦无区分度）→ LED 宽度信号
 > 改开关默认停用（`blur_led_check_enabled=False`），模糊判定由 ROI 方差独担。
 
-## 关于"模糊"（2026-09-18 存活列信号 + 标定现状）
+## 关于"模糊"（2026-10-29 现行 C 刀口）
 
 本线"模糊"的定义是**机器没停稳**：拼接图一部分模糊一部分清晰；原图对可能一张模糊
 一张清晰，也可能两张都模糊。成品图由两张原图按固定竖向刀口交叉取片拼成，**只有每张
-原图"存活"的列进入成品**（bigbox 线 5472 宽刀口实测 2000/2700/3300，逐列归属扫描
-确认，见 `scripts/_probe_blur3.py`）——成品模糊只由存活列决定，所以模糊检测应只测
-存活列，而不是整张原图（整图会把被丢弃的列混进来稀释信号）。新增 `blur_strip_*`
-metric 正是存活列的 Laplacian 方差（单次全图卷积后按列分组，零额外卷积开销）。
+原图"存活"的列进入成品**。刀口默认 **C = 2200/2780/3300**（`layout=None`）；
+旧批次用 `layout="A"`（2000/2700/3300）或 `"B"`（1950/2500/3050）显式切换，
+模糊存活列、单张缝位、固定缝窗会一起切换，不要只改 `blur_strip_cuts`。
 
-**标定现状：结论是"暂不启用失败判定"。**
+**现行判据（`blur_strip_check_enabled=True`）**
 
-- 已标注模糊原图 12 组（`data/模糊` 007~014 ＋ `data/total` 019/025/027/032，拼接
-  关系已逐列像素级确认）存活列 var = 24.97~30.47，确实落在全量分布最低端
-  （全量 photo1 中位 46.7、p10 34.5）；
-- **但全量分布连续单峰、无分离门限**，且 `data/正常`（存活列 var 33.2~69.7）与
-  `data/total`（尾巴低到 24.5）明显不同批、基线不同 → 无法在不误伤尾巴的前提下定阈值；
-- 频谱复核（FFT 高频能量比）模糊组/正常组比值 ≈ 1.0，配合模拟标定（仅 1px 运动模糊
-  就让 var 降到基线 37%、2px 降到 28%）可知这些样本运动模糊量 <0.5px，局部也没有
-  （块级 p10 比值 0.983/1.159）→ 这些"模糊"不是常规意义下的运动/失焦模糊；
-- 暗画幅混淆已排除（模糊组平均亮度 72~80，与样本重叠，低 var 不是"暗"造成的）。
-
-**下一步（拿到真值才能定阈值）：** 人工复核
-`results/_probe/模糊候选_复核/名单_新指标排序.csv`——旧名单 56 个候选按存活列 var 重排，
-已知模糊锚点全部落在 24.97~29.60 低带（排名 4~33），验证了排序方向。三档分流：
-`review_first`（var<31，35 个，含全部已知模糊）、`borderline`（31~35，4 个）、
-`likely_false_alarm`（≥35，17 个，是旧 ROI 指标误伤的"清晰但暗/低对比"图，可最后看）。
-真值回来后把 `blur_strip_check_enabled` 改 True，并**按角色分别设阈值**（1.png 用 a 列、
-2.png 用 b 列——两张灯照固有锐度基线不同：photo1 ~30、photo2 ~70，混用会误伤）。
-
-> **2026-09-22 真值集标定完成，模糊检测已启用（并纠正上一版的角色归属）。**
-> 09-18 判定存活列信号无区分度，是因为把模糊集里 015~038 当成了纯模糊样本
-> ——这批文件与不全集 hash 完全相同（实为不全样本），混入后 esw/roi_var/strip
-> 的分布被彻底污染。剔除后用真值子集（纯模糊 8 对 007~014 + 4 张成品，
-> 正常 16 对 + 34 张成品）标定，信号非常干净。
->
-> **角色归属以上一版相反**：实测图 1 的存活列是 stripB（[c1,c2)∪[c3,W)）、
-> 图 2 是 stripA（[0,c1)∪[c2,c3)）。角色由文件名 1.x/2.x 判定，散装单图用
-> 比值指纹（56 对样本实测：1.png 全部 stripA<stripB，2.png 全部相反，零例外）。
->
-> - **主判据：角色感知存活列方差 <46（`blur_strip_alive_var_min`，已启用）**。
->   不能取两列 min——旧 `blur_strip_var_min` 判据取 min，非存活列本来就糊，
->   样本级 16/16 检出但误报 32/50，已作废。
-> - 原图对效果：**检出 8/8 纯模糊，误报 0/50**（1.png 模糊 alive 30.7~41.3，
->   正常 47.1~108.5，41.3~47.1 是干净零重叠间隔）。
-> - ROI 方差 15→20 作兜底，覆盖散装成品图（无角色配对，存活列判据不适用）：
->   兜住 013.png（16.44），代价 1 个误报（066.png 18.9，暗画幅图）。
-> - **已知缺口**：散装成品 010/025/027/031/032/2426（roi_var 22.5~109.8，
->   与正常图完全重叠）。散装成品是拼接图，两张灯照的内容都在画面里，
->   存活列语义失效，需要别的信号。
-> - 端到端实测（生产代码全量跑）：模糊检出 32/68 图（30 对 + 2 成品），
->   正常误报 1/66；smoke test 14/14 通过。
+- 角色感知存活列方差：1.png 取 stripB（`[c1,c2) ∪ [c3,W)`），2.png 取 stripA
+  （`[0,c1) ∪ [c2,c3)`）；角色由文件名 1.x/2.x 判定，散装单图用条带亮度比指纹。
+- 阈值 `blur_strip_alive_var_min=46`、`blur_strip_surviving_var_min=26.5`；
+  这两个值是在 A 刀口上标的，**没有在 C 上重新标定**，只是沿用。
+- C 刀口回归（2026-10-29）：正常 20 对 1.png alive 47.8~112.0（中位 68.9），
+  纯模糊 007~014 为 31.2~41.95；阈值 46 仍有约 5.9 的间隔。旧 A 刀口对应
+  正常 min 47.1、纯模糊 max 41.05。
+- 历史 A 刀口实测：纯模糊 8/8 检出、正常 0/50 误报；ROI var 20 兜底散装成品；
+  散装成品 010/025/027/031/032/2426 是已知缺口。
+- **判不了不再静默 pass**：刀口与画幅不匹配、无法判定 1/2 号角色时，
+  记 `status=undetermined`，按需重拍处理；到 `max_attempts` 仍判不了则转人工。
 
 ## 关于"错位"（2026-09-22 真值集重标定：配对 3/4 检出、0/16 误报；单张改用拼接缝落差 52/67 检出、0/34 误报）
 
@@ -306,18 +304,24 @@ y_bot 0.912~0.944），导致 8/8 对照原图被"不全"误判（007 y_bot=0.91
 > 两表同步（不全 43→35 行）。保持族中 2053/2119/2163 等贴阈样本待复核。
 ## 上线标定（重要）
 
-0. **质检输入必须是相机原图**（未裁剪、未缩放）。"根盒边框角点越界"等检查依赖
-   全幅语义，裁剪/缩略图会导致误报。
+0. **质检输入必须是相机原图**（未裁剪、未缩放），默认画幅 **5472×3648**。
+   "根盒边框角点越界"等检查依赖全幅语义，裁剪/缩略图会导致误报；分辨率守卫会把
+   其他尺寸判 `undetermined`。换相机/换分辨率必须同时改
+   `expected_width/expected_height` 并重新标定刀口。
 1. **阈值默认值基于 2026-09-07 F:\2026_maize_root_ertao 现场重标定**
    （全天 1170 组分布 + 问题样本逐张核对），原 D:\yy1 夜间调优值见 config.py 注释；
    换产线/换拍摄环境必须重新标定。
    `blur_led_max_width / completeness_hull / alignment_shift / alignment_inlier`
    四项已于 2026-09-08 按 bigbox 线（`D:\pic\data` 已有命中样本 + 抽检）调整，
    当天仍存疑的 `blur_var_min` 建议在硬盘回归后取一批正常图复核。
-2. 建议流程：新环境跑 `scripts/smoke_test.py` 确认管线可用 → 抽取 3~5 天真实照片
+2. 建议流程：新环境跑 `scripts/smoke_test.py` + `scripts/opt_test.py` +
+   `scripts/regression_5472.py` 确认管线/画幅/竖拍可用 → 抽取 3~5 天真实照片
    用离线批量模式跑一遍，对照检出率核对阈值 → 需要调整只改 `config.py:THRESHOLDS`。
 3. 标定时重点看 metric 分布（报告 JSON 里有每张的 metric），动态调阈值。
 4. `blur_var_min`（ROI 拉普拉斯）建议按现场清晰图基线标定后固定。
+5. **刀口/布局跟随相机角度**：默认 C；旧角度批次用 `layout="A"` 或 `"B"`。
+   换角度必须重新测刀口并整套切换（模糊存活列、单张缝位、固定缝窗），
+   只改 `blur_strip_cuts` 会让另外两类判据错位。
 
 ## 用法三：导出坏图（筛选 + 整夹分类剪切）
 
@@ -358,9 +362,13 @@ rootbox_qc）。目标机需装 Python 3.9+，且 `pip install -r requirements.t
 ## 自检
 
 ```bash
-python scripts/smoke_test.py     # 合成图全链路：期望 SMOKE OK
-python scripts/opt_test.py       # 五类检测新信号的专项验证：期望 ALL PASS
+python scripts/smoke_test.py       # 合成图全链路：期望 SMOKE OK
+python scripts/opt_test.py         # 五类信号/复用/刀口/三态：期望 ALL PASS
+python scripts/regression_5472.py  # 5472 横/竖图 + 真实锚点：期望 11/11 PASS
 ```
+
+`regression_5472.py` 只读 `D:\rootguard\data` 的少量锚点（正常 917/915/912、
+模糊 007~010），不会改动数据；换机器用 `--data` 指定数据根目录。
 
 ## 常见问题
 
@@ -369,9 +377,10 @@ python scripts/opt_test.py       # 五类检测新信号的专项验证：期望
 | `ModuleNotFoundError: cv2` | `pip install -r requirements.txt` |
 | 提示"无缝拼接脚本不存在" | 配置 `paths.stitch_script` 或环境变量 `ROOTBOX_QC_STITCH_SCRIPT`，指向提供 `stitch_from_qc` 的脚本 |
 | 扫描到 0 对 | 检查 INPUT_DIR；也可设环境变量 `ROOTBOX_QC_INPUT_DIR` |
-| 好图全被标模糊 | 上调 `blur_led_max_width` 或 `blur_var_min` |
+| 好图全被标模糊 | 先看报告 `input_kind`/`layout` 是否与画幅匹配（不匹配应报 undetermined，而不是模糊）；再核对 1/2 号角色和 C 刀口，最后才动 `blur_strip_alive_var_min` |
+| 提示"分辨率 ... 不是 5472x3648" | 输入被裁剪/缩放，或换了相机；改 `expected_width/expected_height` 并重标刀口，不要直接关守卫 |
 | 好图全被标倾斜 | 上调 `tilt_angle_max_deg`（旧值 8.714 经 D:\yy1 调优） |
-| 大图跑得慢 | 5472×3648 约 0.5~0.9s/张；线上场景可用 `align_orb_downscale` 调大提速 |
+| 大图跑得慢 | 本机实测 5472×3648 单张约 0.8~1.5s、成对约 1.8~3.2s；线上可用 `align_orb_downscale` 调大提速 |
 
 ## 日志
 

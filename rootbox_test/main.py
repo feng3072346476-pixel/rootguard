@@ -7,7 +7,7 @@
         print(rep.recapture_reasons)   # → 通知小车重拍第 1 张
 
 用法：
-    1. 修改 INPUT_DIR 为你的照片目录（也支持环境变量 ROOTBOX_QC_INPUT_DIR）
+    1. 设置环境变量 ROOTBOX_QC_INPUT_DIR，或修改 config.py 的 paths.input_dir
     2. 运行：右键 → Run 'main'（或 py main.py）
 
 可选：
@@ -15,12 +15,16 @@
 - write_files=False 只看终端结果
 - show=False 只拿 reports 自己处理
 """
+import os
+
 from rootbox_qc import run
 
 # ============================================================================
 # 你唯一需要改的地方
 # ============================================================================
-INPUT_DIR = r"D:\pic\data\total"   # ← 改成你的照片目录
+# 优先读环境变量 ROOTBOX_QC_INPUT_DIR；未设置时用 config.py 的 paths.input_dir。
+# 不要再把某台机器的绝对路径写死在这里，否则换机即 FileNotFoundError。
+INPUT_DIR = os.environ.get("ROOTBOX_QC_INPUT_DIR") or None
 
 # 临时阈值覆盖示例（不改源码；置为 {} 表示用 config.py 里的默认）
 # 例如：模糊方差阈值调整：

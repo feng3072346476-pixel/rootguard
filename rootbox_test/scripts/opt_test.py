@@ -45,6 +45,8 @@ def check(name, cond, extra=""):
 try:
     cfg = load_config()
     th = dict(cfg["thresholds"])
+    # 合成图 1200×1600，不是产线 5472×3648；关闭分辨率守卫，否则全部判 undetermined。
+    th["resolution_guard_enabled"] = False
     fp = dict(cfg["frame_detect"])
 
     print("== 1. 损坏：截断检测 + 体积/分辨率归一 ==")
@@ -144,6 +146,8 @@ try:
     th_bp = dict(th)
     th_bp["blur_strip_check_enabled"] = False
     th_bp["blur_var_min"] = 0.0
+    # 合成场景没有底部金属长边，长边判据会判 undetermined；这里只隔离 blur_pair。
+    th_bp["completeness_longedge_check_enabled"] = False
     rep_bp = verify_pair(sharp_p, soft_p, th_bp)
     check("成对模糊独立命中 blur_pair（单张检查全过）",
           all(img.passed for img in rep_bp.images)
@@ -211,11 +215,16 @@ try:
           raw_As["passed"] and raw_As["metric"].get("alignment_single_check") == "skipped_raw",
           raw_As["metric"])
 
-    pre_a = verify_single(pc1, th)
-    pre_b = verify_single(pc2, th)
+    pre_a = verify_single(pc1, th, input_kind="raw")
+    pre_b = verify_single(pc2, th, input_kind="raw")
     rep_reuse = verify_pair(pc1, pc2, th, res_a=pre_a, res_b=pre_b)
-    check("verify_pair 支持复用 verify_single 结果",
+    check("verify_pair 支持复用 input_kind 一致的 verify_single 结果",
           rep_reuse.images[0] is pre_a.images[0] and rep_reuse.images[1] is pre_b.images[0])
+    pre_auto = verify_single(pc1, th)
+    rep_noreuse = verify_pair(pc1, pc2, th, res_a=pre_auto, res_b=pre_b)
+    check("单图 auto 猜出的模态不复用到成对 raw",
+          rep_noreuse.images[0] is not pre_auto.images[0]
+          and rep_noreuse.images[0].input_kind == "raw")
 
     tracker = RecaptureTracker(max_attempts=2, max_consecutive_same_category=3)
     for idx in range(1, 4):
@@ -249,6 +258,18 @@ try:
         cv2.imwrite(os.path.join(bdir, "2.jpg"), orig)
     scanned = collect_pairs(sub_root, r"^(?P<prefix>.+)[_-](?P<idx>[12])\.(?:jpg|jpeg|png|bmp)$")
     check("子目录 1.jpg+2.jpg 配对 & 模式 D 多子目录汇总", len(scanned) == 2, scanned)
+
+    print("== 8. C 刀口 / layout 切换 / 分辨率守卫三态 ==")
+    check("默认整套刀口为 C", checks._active_cuts({}) == [2200, 2780, 3300],
+          checks._active_cuts({}))
+    check("layout=A 同时切换模糊与单张缝位刀口",
+          checks._active_cuts({"layout": "A"}) == [2000, 2700, 3300],
+          checks._active_cuts({"layout": "A"}))
+    rep_guard = verify_single(good)
+    check("非 5472 原图判 undetermined 且默认重拍",
+          rep_guard.status == "undetermined" and rep_guard.recapture_needed
+          and any("分辨率" in r for r in rep_guard.recapture_reasons),
+          (rep_guard.status, rep_guard.recapture_reasons[:1]))
 
     print()
     print("ALL PASS" if ok_all else "SOME FAILED")

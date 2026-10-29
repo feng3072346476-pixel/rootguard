@@ -24,6 +24,12 @@ from rootbox_qc import verify_single, verify_pair  # noqa: E402
 W, H = 1200, 1600          # 合成图尺寸（宽 x 高）
 OUT = tempfile.mkdtemp(prefix="rootbox_smoke_")
 
+# 合成图不是 5472×3648，关闭分辨率守卫（生产默认开启，非标尺寸判 undetermined）。
+# 合成图没有"底部金属长边"结构，长边判据会判 undetermined；该判据由 opt_test 的
+# full_box/cut_bot 用例覆盖，这里只测亮占比不全与其余四类。
+SMOKE_CFG = {"thresholds": {"resolution_guard_enabled": False,
+                            "completeness_longedge_check_enabled": False}}
+
 rng = np.random.default_rng(42)
 
 
@@ -141,7 +147,7 @@ def build_cases() -> dict:
 
 
 def check_single(name: str, path: str | None, expect_fail: bool,
-                 expect_types: set[str] | None = None, cfg=None) -> bool:
+                 expect_types: set[str] | None = None, cfg=SMOKE_CFG) -> bool:
     if path is None:
         return True
     rep = verify_single(path, cfg)
@@ -157,7 +163,8 @@ def check_single(name: str, path: str | None, expect_fail: bool,
     return ok
 
 
-def check_pair_case(name: str, pair_paths: tuple, expect_types: set[str], cfg=None) -> bool:
+def check_pair_case(name: str, pair_paths: tuple, expect_types: set[str],
+                    cfg=SMOKE_CFG) -> bool:
     from rootbox_qc.verify import failed_checks
     rep = verify_pair(pair_paths[0], pair_paths[1], cfg)
     failed = {f["name"] for f in failed_checks(rep)}

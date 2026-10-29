@@ -29,10 +29,24 @@ class ImageResult:
     path: str
     checks: list = field(default_factory=list)
     load_error: str | None = None
+    input_kind: str | None = None   # 本结果按哪种模态算出来的，复用前必须核对
+
+    @property
+    def status(self) -> str:
+        """三态：pass / fail / undetermined（任一确定失败优先于判不了）。"""
+        if self.load_error is not None:
+            return "fail"
+        states = [c.get("status", "pass" if c["passed"] else "fail")
+                  for c in self.checks]
+        if "fail" in states:
+            return "fail"
+        if "undetermined" in states:
+            return "undetermined"
+        return "pass"
 
     @property
     def passed(self) -> bool:
-        return self.load_error is None and all(c["passed"] for c in self.checks)
+        return self.status == "pass"
 
 
 @dataclass
@@ -46,6 +60,7 @@ class QCReport:
     recapture_needed: bool = False
     recapture_reasons: list = field(default_factory=list)
     recapture_targets: list = field(default_factory=list)
+    status: str = "pass"              # pass / fail / undetermined（判不了默认重拍）
     attempt: int = 1
     max_attempts: int = 2
     escalate_manual: bool = False     # attempt >= max_attempts 且仍不合格时转人工/停机
@@ -56,7 +71,8 @@ class QCReport:
 
     def to_dict(self) -> dict:
         d = asdict(self)
-        d["passed"] = not self.recapture_needed
+        d["status"] = self.status
+        d["passed"] = self.status == "pass"
         # 对外文档契约（README）：重拍队列 / HTTP 消费方读 reasons / targets，
         # 与内部字段名 recapture_reasons / recapture_targets 保持一致别名
         d["reasons"] = self.recapture_reasons
@@ -115,7 +131,7 @@ def _resolve_single_input_kind(path: str | None, gray: np.ndarray | None, th: di
         if min(gray.shape[:2]) >= 2000:
             g = gray if gray.shape[0] <= gray.shape[1] else cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
             w = g.shape[1]
-            cuts = th.get("blur_strip_cuts") or [2000, 2700, 3300]
+            cuts = checks._active_cuts(th)
             if len(cuts) >= 3 and 0 < cuts[0] < cuts[1] < cuts[2] < w:
                 c1, c2, c3 = int(cuts[0]), int(cuts[1]), int(cuts[2])
                 ga = float((np.concatenate([g[:, 0:c1], g[:, c2:c3]], axis=1) > 220).mean())
@@ -162,15 +178,35 @@ def _stitch_in_memory(img_a: np.ndarray, img_b: np.ndarray, pair_id: str,
 
 
 def _run_single_checks(path, img, gray, frame, th) -> ImageResult:
-    res = ImageResult(path=path)
+    res = ImageResult(path=path, input_kind=th.get("input_kind"))
     res.checks.append(checks.check_corruption(path=path, img_bgr=img, th=th))
     if img is None or gray is None:
         res.load_error = "decode_failed"
         return res
+
+    # 分辨率守卫：现行相机原图只有 5472×3648（竖拍旋转后同尺寸）。
+    # 非该尺寸不缩放刀口、不硬猜 input_kind，直接判"无法判定"（默认重拍）。
+    if bool(th.get("resolution_guard_enabled", True)):
+        h, w = gray.shape
+        ew = int(th.get("expected_width", 5472))
+        eh = int(th.get("expected_height", 3648))
+        if sorted((w, h)) != sorted((ew, eh)):
+            res.checks.append(checks._undetermined(
+                "resolution",
+                {"width": int(w), "height": int(h)},
+                {"expected_width": ew, "expected_height": eh},
+                f"分辨率 {w}x{h} 不是 {ew}x{eh}，刀口/判据未按该尺寸标定"))
+            return res
+
     res.checks.append(checks.check_blur(img, gray, frame, th, path=path))
     res.checks.append(checks.check_completeness(img, gray, frame, th))
     res.checks.append(checks.check_alignment_single(img, gray, frame, th))
     return res
+
+
+def _reuse_matches_kind(prev: ImageResult, expected_kind: str) -> bool:
+    """复用 verify_single 结果前核对模态；猜成 mosaic 就重算，避免永久漏 blur。"""
+    return prev is not None and prev.input_kind == expected_kind
 
 
 # 特征检测缓存：只缓存 frame 结果（小 dict，不缓存大图矩阵，避免内存爆炸）
@@ -281,15 +317,23 @@ def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
     report = QCReport(pair_id=pair_id, attempt=attempt, max_attempts=max_att)
 
     img_a, gray_a, frame_a = _prepare(path_a, cfg)
-    if th.get("input_kind", "auto") == "auto":
-        th["input_kind"] = "raw" if path_b is not None else _resolve_single_input_kind(path_a, gray_a, th)
+    if path_b is not None:
+        # 成对原图模式：即使配置是 auto 或调用方传了 mosaic，也强制按 raw 重算/复用，
+        # 否则单图阶段猜成 mosaic 会把存活列模糊判据永久跳过。
+        th["input_kind"] = "raw"
+    elif th.get("input_kind", "auto") == "auto":
+        th["input_kind"] = _resolve_single_input_kind(path_a, gray_a, th)
     prev_a = _extract_image_result(res_a, path_a)
+    if prev_a is not None and not _reuse_matches_kind(prev_a, th["input_kind"]):
+        prev_a = None
     report.images.append(prev_a if prev_a is not None
                          else _run_single_checks(path_a, img_a, gray_a, frame_a, th))
 
     if path_b is not None:
         img_b, gray_b, frame_b = _prepare(path_b, cfg)
         prev_b = _extract_image_result(res_b, path_b)
+        if prev_b is not None and not _reuse_matches_kind(prev_b, "raw"):
+            prev_b = None
         report.images.append(prev_b if prev_b is not None
                              else _run_single_checks(path_b, img_b, gray_b, frame_b, th))
         if img_a is not None and img_b is not None:
@@ -335,47 +379,64 @@ def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
 
 
 def _collect_report(report: QCReport, path_b: str | None) -> None:
-    """汇总结论：recapture_needed / reasons / targets / escalate_manual。"""
+    """汇总结论：status / recapture_needed / reasons / targets / escalate_manual。
+
+    三态：任一项确定失败 -> fail；否则任一项判不了 -> undetermined；
+    两者都按需重拍处理（undetermined 到 max_attempts 后同样转人工）。
+    """
     reasons = []
     targets = []
+    states: list[str] = []
+
+    def add_reason(state: str, text: str, paths: list) -> None:
+        states.append(state)
+        prefix = "无法判定：" if state == "undetermined" else ""
+        reasons.append(prefix + text)
+        for p in paths:
+            if p and p not in targets:
+                targets.append(p)
+
     for r in report.images:
-        if r.load_error or not r.passed:
-            label = os.path.basename(r.path)
-            failed = [c["reason"] for c in r.checks if not c["passed"]]
-            if r.load_error:
-                failed = [f"图片损坏({r.load_error})"] + failed
-            if failed:
-                reasons.append(f"[{label}] " + "；".join(failed))
-                targets.append(r.path)
+        label = os.path.basename(r.path)
+        failed = []
+        if r.load_error:
+            states.append("fail")
+            failed.append(f"图片损坏({r.load_error})")
+        for c in r.checks:
+            st = c.get("status", "pass" if c["passed"] else "fail")
+            if st == "pass":
+                continue
+            states.append(st)
+            prefix = "无法判定：" if st == "undetermined" else ""
+            failed.append(prefix + c["reason"])
+        if failed:
+            reasons.append(f"[{label}] " + "；".join(failed))
+            targets.append(r.path)
 
-    if report.alignment_pair is not None and not report.alignment_pair["passed"]:
-        reasons.append("[整对] " + report.alignment_pair["reason"])
-        for p in (report.images[0].path, path_b):
-            if p and p not in targets:
-                targets.append(p)
+    def add_pair(res: dict | None, paths: list) -> None:
+        if res is None or res["passed"]:
+            return
+        st = res.get("status", "fail")
+        add_reason(st, "[整对] " + res["reason"], paths)
 
-    if report.repeat_pair is not None and not report.repeat_pair["passed"]:
-        reasons.append("[整对] " + report.repeat_pair["reason"])
-        for p in (report.images[0].path, path_b):
-            if p and p not in targets:
-                targets.append(p)
+    pair_paths = [report.images[0].path, path_b] if report.images else [path_b]
+    add_pair(report.alignment_pair, pair_paths)
+    add_pair(report.repeat_pair, pair_paths)
 
     if report.blur_pair is not None and not report.blur_pair["passed"]:
-        reasons.append("[整对] " + report.blur_pair["reason"])
         # 只有糊的那一张需要重拍（另一张清晰），软路径由 metric 直接给出；无软路径时退回整对
         soft = (report.blur_pair.get("metric") or {}).get("soft_path")
-        blur_targets = [soft] if soft else [report.images[0].path, path_b]
-        for p in blur_targets:
-            if p and p not in targets:
-                targets.append(p)
+        add_pair(report.blur_pair, [soft] if soft else pair_paths)
 
-    if report.illumination_pair is not None and not report.illumination_pair["passed"]:
-        reasons.append("[整对] " + report.illumination_pair["reason"])
-        # 照明异常需整对重拍（灯管/曝光问题，两张都不可用）
-        for p in (report.images[0].path, path_b):
-            if p and p not in targets:
-                targets.append(p)
+    # 照明异常需整对重拍（灯管/曝光问题，两张都不可用）
+    add_pair(report.illumination_pair, pair_paths)
 
+    if "fail" in states:
+        report.status = "fail"
+    elif "undetermined" in states:
+        report.status = "undetermined"
+    else:
+        report.status = "pass"
     report.recapture_needed = len(reasons) > 0
     report.recapture_reasons = reasons
     report.recapture_targets = targets
@@ -390,6 +451,7 @@ def _collect_report(report: QCReport, path_b: str | None) -> None:
 # ============================================================================
 CHECK_CATEGORY = {
     "corruption": "损坏",
+    "resolution": "其它",          # 画幅尺寸与标定不符：不是图片内容缺陷，需按环境处理
     "illum_pair": "损坏",          # 单灯管/单侧照明缺失（README：归损坏）
     "blur": "模糊",
     "blur_pair": "模糊",
@@ -420,6 +482,7 @@ def failed_checks(report: QCReport) -> list:
         category : 类别（见 CHECK_CATEGORY）
         scope    : "image"（单图检查）或 "pair"（整对检查）
         paths    : 该失败涉及的图片路径列表
+        status   : "fail" 或 "undetermined"（判不了，按重拍处理）
         reason   : 原因文案
     """
     out = []
@@ -427,12 +490,13 @@ def failed_checks(report: QCReport) -> list:
     for r in report.images:
         if r.load_error:
             out.append({"name": "corruption", "category": category_of("corruption"),
-                        "scope": "image", "paths": [r.path],
+                        "scope": "image", "paths": [r.path], "status": "fail",
                         "reason": f"图片损坏({r.load_error})"})
         for c in r.checks:
             if not c["passed"]:
                 out.append({"name": c["name"], "category": category_of(c["name"]),
-                            "scope": "image", "paths": [r.path], "reason": c["reason"]})
+                            "scope": "image", "paths": [r.path],
+                            "status": c.get("status", "fail"), "reason": c["reason"]})
     for field_name, default_name in _PAIR_FIELDS:
         res = getattr(report, field_name, None)
         if res is None or res["passed"]:
@@ -445,7 +509,8 @@ def failed_checks(report: QCReport) -> list:
             if soft in img_paths:
                 paths = [soft]
         out.append({"name": name, "category": category_of(name), "scope": "pair",
-                    "paths": paths, "reason": res["reason"]})
+                    "paths": paths, "status": res.get("status", "fail"),
+                    "reason": res["reason"]})
     return out
 
 

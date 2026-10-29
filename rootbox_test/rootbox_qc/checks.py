@@ -37,6 +37,17 @@ def _with_defaults(th: dict | None) -> dict:
     return {**THRESHOLDS, **th}
 
 
+def _active_cuts(th: dict) -> list:
+    """当前生效的三刀口：layout 优先（整套切换），否则用自定义 blur_strip_cuts。"""
+    layout = th.get("layout")
+    if layout in MOSAIC_LAYOUTS:
+        return list(MOSAIC_LAYOUTS[layout])
+    cuts = th.get("blur_strip_cuts")
+    if cuts and len(cuts) >= 3:
+        return [int(c) for c in cuts[:3]]
+    return list(MOSAIC_LAYOUTS.get("C", (2200, 2780, 3300)))
+
+
 # ---------------------------------------------------------------------------
 # 1. 图片损坏
 # ---------------------------------------------------------------------------
@@ -129,8 +140,10 @@ def check_corruption(path: str | None = None, img_bgr=None, th: dict | None = No
         if bpm < min_bpm:
             reasons.append(f"文件体积极低（{bpm:.0f}B/MP < {min_bpm:.0f}B/MP），疑似未完整写入")
 
-    # 截断检查：cv2 对截断图会静默返回部分图，核对解码尺寸与文件头声明
-    if hdr_size is not None and (hdr_size[1], hdr_size[0]) != (h, w):
+    # 截断检查：cv2 对截断图会静默返回部分图，核对解码尺寸与文件头声明。
+    # load_image 会把竖拍大图顺时针旋转 90°，此时解码尺寸与文件头恰好横竖互换；
+    # 只接受"同尺寸"或"精确转置"两种，不能因为正常竖拍误报截断。
+    if hdr_size is not None and (hdr_size[1], hdr_size[0]) not in ((h, w), (w, h)):
         reasons.append(f"解码尺寸 {w}x{h} 与文件头 {hdr_size[0]}x{hdr_size[1]} 不符，疑似文件截断")
 
     g_std = float(np.std(gray))
@@ -311,6 +324,7 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
     threshold: dict = {}
     reasons = []
     notes = []
+    undetermined = []
 
     roi = _bright_roi(gray, frame)
     var_min = float(th.get("blur_var_min", 20.0))
@@ -321,7 +335,7 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
         reasons.append(f"亮区纹理锐度不足（Laplacian 方差 {var:.1f} < {var_min:.1f}）")
 
     if bool(th.get("blur_strip_metric_enabled", True)):
-        cuts = th.get("blur_strip_cuts") or list(MOSAIC_LAYOUTS.get("A", (2000, 2700, 3300)))
+        cuts = _active_cuts(th)
         sa, sb = _mosaic_strip_var(gray, cuts)
         metric["blur_strip_a_var"] = sa
         metric["blur_strip_b_var"] = sb
@@ -341,7 +355,14 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
             metric["blur_strip_check"] = "skipped_mosaic"
             notes.append("拼接成品图模式（input_kind=mosaic），跳过原图存活列模糊判定")
         elif bool(th.get("blur_strip_check_enabled", True)):
-            if alive is not None and alive < threshold["blur_strip_alive_var_min"]:
+            if sa is None or sb is None:
+                # 刀口与画幅不匹配时旧代码会静默 pass；生产模式改为无法判定，交重拍/人工。
+                if bool(th.get("resolution_guard_enabled", True)):
+                    undetermined.append(
+                        f"刀口 {cuts} 与画幅宽度 {gray.shape[1]} 不匹配，无法计算存活列方差")
+            elif role is None:
+                undetermined.append("无法判定该图属于 1 号还是 2 号灯照角色，存活列判据不可用")
+            elif alive is not None and alive < threshold["blur_strip_alive_var_min"]:
                 reasons.append(f"拼接存活列纹理锐度不足（{role} 号图存活列 Laplacian 方差 "
                                f"{alive:.1f} < {threshold['blur_strip_alive_var_min']:.1f}）")
             elif surviving is not None and surviving < threshold["blur_strip_surviving_var_min"]:
@@ -350,6 +371,8 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
 
     if reasons:
         return _fail("blur", metric, threshold, "；".join(reasons))
+    if undetermined:
+        return _undetermined("blur", metric, threshold, "；".join(undetermined))
     return _ok("blur", metric, threshold, "；".join(notes))
 
 
@@ -367,7 +390,8 @@ def _long_edge_metric(gray, width=512, grad_t=40.0, pos_thr=0.25, bot_zone_start
     gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
     tall = np.convolve((np.abs(gy) > grad_t).mean(axis=1), np.ones(7) / 7.0, mode="same")
     h = len(tall)
-    bot_zone_max = round(float(tall[int(bot_zone_start * h):].max()), 3)
+    start = max(0, min(h - 1, int(bot_zone_start * h)))
+    bot_zone_max = round(float(tall[start:].max()), 3)
     strong = np.where(tall > pos_thr)[0]
     if not len(strong):
         return {"y_top": None, "y_bot": None, "bot_zone_max": bot_zone_max}
@@ -406,6 +430,7 @@ def check_completeness(img_bgr, gray, frame, th: dict | None = None) -> dict:
     th = _with_defaults(th)
     bf_max = float(th.get("completeness_bright_ratio_max", 0.30))
     reasons = []
+    undetermined = []
 
     bright_ratio = float((frame or {}).get("bright_ratio", 0.0))
     metric = {"bright_ratio": round(bright_ratio, 4)}
@@ -431,18 +456,26 @@ def check_completeness(img_bgr, gray, frame, th: dict | None = None) -> dict:
         threshold["dark_mean_max"] = dark_mean_max
         mean_all = float(gray.mean())
         metric["long_edge"]["mean_gray"] = round(mean_all, 1)
-        if (le["y_top"] is not None and le["bot_zone_max"] < pos_thr
-                and mean_all >= dark_mean_max):
-            step = _seam_step_misalign(gray, th)
-            if step is None:
-                reasons.append(
-                    f"底部无金属长边结构（底部区挺直度峰值 {le['bot_zone_max']:.2f} < "
-                    f"{pos_thr:.2f}），疑似未拍全根盒下侧")
+        if le["y_top"] is None:
+            undetermined.append("未找到上下金属长边，底部结构判据不可用")
+        elif le["bot_zone_max"] < pos_thr:
+            if mean_all < dark_mean_max:
+                undetermined.append(
+                    f"画面过暗（均值 {mean_all:.1f} < {dark_mean_max:.0f}），"
+                    f"底部挺直度 {le['bot_zone_max']:.2f} 不可信")
             else:
-                metric["long_edge"]["seam_step_exempt"] = step
+                step = _seam_step_misalign(gray, th)
+                if step is None:
+                    reasons.append(
+                        f"底部无金属长边结构（底部区挺直度峰值 {le['bot_zone_max']:.2f} < "
+                        f"{pos_thr:.2f}），疑似未拍全根盒下侧")
+                else:
+                    metric["long_edge"]["seam_step_exempt"] = step
 
     if reasons:
         return _fail("completeness", metric, threshold, "；".join(reasons))
+    if undetermined:
+        return _undetermined("completeness", metric, threshold, "；".join(undetermined))
     return _ok("completeness", metric, threshold)
 
 
@@ -1031,10 +1064,16 @@ def check_alignment_single(img_bgr, gray, frame, th: dict | None = None) -> dict
 # 辅助
 # ---------------------------------------------------------------------------
 def _ok(name: str, metric, threshold, note: str = "") -> dict:
-    return {"name": name, "passed": True, "metric": metric,
+    return {"name": name, "passed": True, "status": "pass", "metric": metric,
             "threshold": threshold, "reason": note}
 
 
 def _fail(name: str, metric, threshold, reason: str) -> dict:
-    return {"name": name, "passed": False, "metric": metric,
+    return {"name": name, "passed": False, "status": "fail", "metric": metric,
+            "threshold": threshold, "reason": reason}
+
+
+def _undetermined(name: str, metric, threshold, reason: str) -> dict:
+    """三态中的"判不了"：不是合格，也不是确定不合格；默认按重拍处理。"""
+    return {"name": name, "passed": False, "status": "undetermined", "metric": metric,
             "threshold": threshold, "reason": reason}
