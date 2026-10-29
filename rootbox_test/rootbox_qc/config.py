@@ -100,6 +100,7 @@ THRESHOLDS = {
     "blur_strip_check_enabled": True,
     "blur_strip_alive_var_min": 46.0,        # 角色对应的反光侧存活列 Laplacian 方差下限
     "blur_strip_surviving_var_min": 26.5,    # 角色对应的无反光取片列 Laplacian 方差下限
+    "blur_strip_alive_led_ratio_min": 0.005, # 存活列高亮灯管像素占比下限；低于此值视为该侧无灯，跳过存活列判据
     # layout=None 表示按现行 C 线；切旧角度时设 layout="A"/"B"，整套刀口一起切。
     # blur_strip_cuts 仅作为自定义覆盖：layout 非空时以 layout 为准。
     "layout": None,
@@ -110,14 +111,23 @@ THRESHOLDS = {
     "blur_pair_roi_var_max": 25.5,           # 糊图亮区 Laplacian 方差上限
     "blur_pair_ratio_min": 2.2,              # 两张方差比下限
 
-    # ----- 3. 拍摄不全（亮像素占比上限 + 底部金属长边结构缺失 Rule A） -----
+    # ----- 3. 拍摄不全（亮像素占比上限 + 上侧金属长边被推离画面 + 底部结构兜底） -----
     "completeness_bright_ratio_max": 0.30,         # 亮像素占比上限（超过视为拍到支架/贴脸）
     "completeness_longedge_check_enabled": True,
     "completeness_longedge_profile_width": 512,    # 剖面下采样宽度（px）
     "completeness_longedge_grad_thresh": 40.0,     # Sobel 垂直梯度绝对值门限
     "completeness_longedge_pos_thr": 0.25,         # 强长边挺直度门限（该行强梯度列占比）
-    "completeness_longedge_bot_zone_start": 0.85,  # Rule A 底部结构带检查区间起点 [0.85, 1.0]
-    "completeness_dark_mean_max": 65.0,            # 暗图守卫：全图灰度均值低于此值视为暗帧，豁免 Rule A
+    "completeness_longedge_bot_zone_start": 0.85,  # 底部结构带检查区间起点 [0.85, 1.0]
+    "completeness_dark_mean_max": 65.0,            # 暗图守卫：全图灰度均值低于此值视为暗帧，豁免底部 Rule A
+    # 上侧金属长边：正常应贴近画面顶部（y_top <= 0.045）；相机整体下移拍到相邻根盒时，
+    # 上侧长边会被推到画面内（y_top 0.05~0.30），同时底部结构变弱。
+    "completeness_top_edge_check_enabled": True,
+    "completeness_top_edge_pos_thr": 0.30,         # 上侧长边的强挺直度门限（比底部 0.25 更严，避开弱纹理线）
+    "completeness_top_edge_y_max": 0.045,          # 上侧长边允许的最大归一化位置
+    "completeness_top_edge_missing_y": 0.30,       # y_top 超过此值视为“上侧长边不可见”
+    "completeness_top_edge_bot_max": 0.35,         # 上侧长边偏低时，底部挺直度低于此值才判不全
+    "completeness_top_missing_bot_max": 0.396,     # 上侧长边不可见时，底部挺直度低于此值才判不全
+    "completeness_bottom_floor": 0.15,             # 上侧正常时，底部挺直度低于此值视为下侧完全缺失
 
     # ----- 4. 错位（成对：区域带相位为主 + ORB 特征匹配 + 质心兜底） -----
     "alignment_band_check_enabled": True,

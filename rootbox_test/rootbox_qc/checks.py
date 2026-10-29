@@ -250,6 +250,25 @@ def _mosaic_strip_role(gray, cuts, path: str | None = None,
     return None
 
 
+def _strip_led_ratio(gray, cuts, role: str | None) -> float | None:
+    """存活列里高亮灯管像素占比：用于判断“该侧是否真的有一根灯管”。
+
+    灯管未开/不在该侧时，存活列 Laplacian 方差天然偏低，不能据此判模糊；
+    正常无灯图片的占比 <0.3%，有灯管拖影图约 3%。
+    """
+    if gray is None or not cuts or len(cuts) < 3 or role not in ("1", "2"):
+        return None
+    g = gray if gray.shape[0] <= gray.shape[1] else cv2.rotate(gray, cv2.ROTATE_90_CLOCKWISE)
+    w = g.shape[1]
+    c1, c2, c3 = int(cuts[0]), int(cuts[1]), int(cuts[2])
+    if not (0 < c1 < c2 < c3 < w):
+        return None
+    reg_a = np.concatenate([g[:, 0:c1], g[:, c2:c3]], axis=1)
+    reg_b = np.concatenate([g[:, c1:c2], g[:, c3:w]], axis=1)
+    alive = reg_b if role == "1" else reg_a
+    return round(float((alive > 200).mean()), 5)
+
+
 def check_blur_pair(img_a, img_b, frame_a, frame_b, th: dict | None = None, *,
                     path_a: str | None = None, path_b: str | None = None) -> dict:
     """成对模糊：两张里一张锐、一张糊（亮区 Laplacian 方差不对称）。"""
@@ -348,9 +367,13 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
         metric["blur_strip_role"] = role
         metric["blur_strip_alive_var"] = alive
         metric["blur_strip_surviving_var"] = surviving
+        led_ratio = _strip_led_ratio(gray, cuts, role)
+        metric["blur_strip_alive_led_ratio"] = led_ratio
         threshold["blur_strip_alive_var_min"] = float(th.get("blur_strip_alive_var_min", 46.0))
         threshold["blur_strip_surviving_var_min"] = float(
             th.get("blur_strip_surviving_var_min", 26.5))
+        threshold["blur_strip_alive_led_ratio_min"] = float(
+            th.get("blur_strip_alive_led_ratio_min", 0.005))
         if th.get("input_kind") == "mosaic":
             metric["blur_strip_check"] = "skipped_mosaic"
             notes.append("拼接成品图模式（input_kind=mosaic），跳过原图存活列模糊判定")
@@ -363,8 +386,14 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
             elif role is None:
                 undetermined.append("无法判定该图属于 1 号还是 2 号灯照角色，存活列判据不可用")
             elif alive is not None and alive < threshold["blur_strip_alive_var_min"]:
-                reasons.append(f"拼接存活列纹理锐度不足（{role} 号图存活列 Laplacian 方差 "
-                               f"{alive:.1f} < {threshold['blur_strip_alive_var_min']:.1f}）")
+                if led_ratio is not None and led_ratio < threshold["blur_strip_alive_led_ratio_min"]:
+                    notes.append(
+                        f"存活列未检测到灯管反光（高亮像素占比 {led_ratio*100:.2f}% < "
+                        f"{threshold['blur_strip_alive_led_ratio_min']*100:.2f}%），"
+                        "存活列锐度判据不适用")
+                else:
+                    reasons.append(f"拼接存活列纹理锐度不足（{role} 号图存活列 Laplacian 方差 "
+                                   f"{alive:.1f} < {threshold['blur_strip_alive_var_min']:.1f}）")
             elif surviving is not None and surviving < threshold["blur_strip_surviving_var_min"]:
                 reasons.append(f"拼接无反光取片列纹理锐度不足（{role} 号图取片列 Laplacian 方差 "
                                f"{surviving:.1f} < {threshold['blur_strip_surviving_var_min']:.1f}）")
@@ -379,8 +408,13 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
 # ---------------------------------------------------------------------------
 # 3. 拍摄不全（亮像素占比上限 + 底部金属长边结构缺失 Rule A）
 # ---------------------------------------------------------------------------
-def _long_edge_metric(gray, width=512, grad_t=40.0, pos_thr=0.25, bot_zone_start=0.85):
-    """上下金属长边的位置与底部区间挺直度峰值（bot_zone_max）。"""
+def _long_edge_metric(gray, width=512, grad_t=40.0, pos_thr=0.25,
+                       bot_zone_start=0.85, top_pos_thr=None):
+    """上下金属长边的位置与底部区间挺直度峰值（bot_zone_max）。
+
+    top_pos_thr 单独控制“上侧长边”的挺直度门限：上侧常有板边/内框弱线，
+    用更严格的 0.30 避免把弱线误当成长边。y_bot 仍按 pos_thr 取。
+    """
     h0, w0 = gray.shape
     if w0 > width:
         s = width / w0
@@ -393,10 +427,15 @@ def _long_edge_metric(gray, width=512, grad_t=40.0, pos_thr=0.25, bot_zone_start
     start = max(0, min(h - 1, int(bot_zone_start * h)))
     bot_zone_max = round(float(tall[start:].max()), 3)
     strong = np.where(tall > pos_thr)[0]
+    if top_pos_thr is None:
+        top_pos_thr = pos_thr
+    strong_top = np.where(tall > top_pos_thr)[0]
     if not len(strong):
         return {"y_top": None, "y_bot": None, "bot_zone_max": bot_zone_max}
-    y_top, y_bot = float(strong[0]) / h, float(strong[-1]) / h
-    return {"y_top": round(y_top, 3), "y_bot": round(y_bot, 3), "bot_zone_max": bot_zone_max}
+    y_top = float(strong_top[0]) / h if len(strong_top) else None
+    y_bot = float(strong[-1]) / h
+    return {"y_top": None if y_top is None else round(y_top, 3),
+            "y_bot": round(y_bot, 3), "bot_zone_max": bot_zone_max}
 
 
 def _seam_step_misalign(gray, th: dict | None = None) -> list | None:
@@ -440,37 +479,78 @@ def check_completeness(img_bgr, gray, frame, th: dict | None = None) -> dict:
         reasons.append(
             f"画面中金属结构过多（亮像素 {bright_ratio*100:.1f}%，疑似相机偏离或拍到支架）")
 
-    # 底部长边结构缺失（Rule A）：剖面有强带但底部区间 [bot_zone_start, 1.0] 无强带 = 下侧被裁
+    # 上侧金属长边被推离画面顶部 = 相机整体下移/拍到相邻根盒（“不全”的主判据）；
+    # 上侧正常时再用底部 Rule A 兜底下侧被裁，避免只查底边漏掉单侧裁切。
     if bool(th.get("completeness_longedge_check_enabled", True)):
         pos_thr = float(th.get("completeness_longedge_pos_thr", 0.25))
         bot_zone_start = float(th.get("completeness_longedge_bot_zone_start", 0.85))
+        top_enabled = bool(th.get("completeness_top_edge_check_enabled", True))
+        top_pos_thr = (float(th.get("completeness_top_edge_pos_thr", 0.30))
+                       if top_enabled else pos_thr)
         le = _long_edge_metric(
             gray,
             width=int(th.get("completeness_longedge_profile_width", 512)),
             grad_t=float(th.get("completeness_longedge_grad_thresh", 40.0)),
             pos_thr=pos_thr,
-            bot_zone_start=bot_zone_start)
+            bot_zone_start=bot_zone_start,
+            top_pos_thr=top_pos_thr)
         metric["long_edge"] = le
         dark_mean_max = float(th.get("completeness_dark_mean_max", 65.0))
         threshold["longedge_bot_zone_start"] = bot_zone_start
         threshold["dark_mean_max"] = dark_mean_max
         mean_all = float(gray.mean())
         metric["long_edge"]["mean_gray"] = round(mean_all, 1)
-        if le["y_top"] is None:
-            undetermined.append("未找到上下金属长边，底部结构判据不可用")
-        elif le["bot_zone_max"] < pos_thr:
-            if mean_all < dark_mean_max:
-                undetermined.append(
-                    f"画面过暗（均值 {mean_all:.1f} < {dark_mean_max:.0f}），"
-                    f"底部挺直度 {le['bot_zone_max']:.2f} 不可信")
-            else:
-                step = _seam_step_misalign(gray, th)
-                if step is None:
+
+        if top_enabled:
+            top_y_max = float(th.get("completeness_top_edge_y_max", 0.045))
+            top_missing_y = float(th.get("completeness_top_edge_missing_y", 0.30))
+            top_bot_max = float(th.get("completeness_top_edge_bot_max", 0.35))
+            top_missing_bot_max = float(th.get("completeness_top_missing_bot_max", 0.396))
+            threshold["top_edge_y_max"] = top_y_max
+            threshold["top_edge_missing_y"] = top_missing_y
+            threshold["top_edge_bot_max"] = top_bot_max
+            threshold["top_missing_bot_max"] = top_missing_bot_max
+            yt, bot = le["y_top"], le["bot_zone_max"]
+            if yt is None or yt > top_missing_y:
+                if bot < top_missing_bot_max:
+                    yt_txt = "未检出" if yt is None else f"{yt:.3f}"
                     reasons.append(
-                        f"底部无金属长边结构（底部区挺直度峰值 {le['bot_zone_max']:.2f} < "
-                        f"{pos_thr:.2f}），疑似未拍全根盒下侧")
+                        f"上侧金属长边缺失/被推离画面顶部（上侧长边位置 {yt_txt}，"
+                        f"阈值 {top_missing_y:.2f}；底部挺直度 {bot:.3f} < "
+                        f"{top_missing_bot_max:.3f}），疑似拍进相邻根盒")
+            elif yt > top_y_max and bot < top_bot_max:
+                reasons.append(
+                    f"上侧金属长边被推离画面边缘（y_top={yt:.3f} > {top_y_max:.3f}；"
+                    f"底部挺直度 {bot:.3f} < {top_bot_max:.2f}），疑似拍进相邻根盒")
+
+        bottom_floor = float(th.get("completeness_bottom_floor", 0.15))
+        threshold["bottom_floor"] = bottom_floor
+        if not reasons:
+            if le["y_top"] is None:
+                if not top_enabled:
+                    undetermined.append("未找到上下金属长边，底部结构判据不可用")
+            elif le["bot_zone_max"] < pos_thr:
+                if le["bot_zone_max"] < bottom_floor:
+                    reasons.append(
+                        f"底部金属长边结构完全缺失（底部挺直度 {le['bot_zone_max']:.3f} < "
+                        f"{bottom_floor:.2f}），疑似未拍全根盒下侧")
+                elif mean_all < dark_mean_max:
+                    if top_enabled:
+                        metric["long_edge"]["dark_bottom_exempt"] = (
+                            f"均值 {mean_all:.1f} < {dark_mean_max:.0f}，"
+                            f"底部挺直度 {le['bot_zone_max']:.2f} 偏低，但上侧长边位置正常")
+                    else:
+                        undetermined.append(
+                            f"画面过暗（均值 {mean_all:.1f} < {dark_mean_max:.0f}），"
+                            f"底部挺直度 {le['bot_zone_max']:.2f} 不可信")
                 else:
-                    metric["long_edge"]["seam_step_exempt"] = step
+                    step = _seam_step_misalign(gray, th)
+                    if step is None:
+                        reasons.append(
+                            f"底部无金属长边结构（底部区挺直度峰值 {le['bot_zone_max']:.3f} < "
+                            f"{pos_thr:.2f}），疑似未拍全根盒下侧")
+                    else:
+                        metric["long_edge"]["seam_step_exempt"] = step
 
     if reasons:
         return _fail("completeness", metric, threshold, "；".join(reasons))

@@ -369,6 +369,57 @@ try:
           (rep_mis_nodir.status, rep_mis_nodir.stitched_status,
            rep_mis_nodir.recapture_reasons[-1:]))
 
+    print("== 10. 不全：上侧长边主判据 + 底部兜底；模糊 LED 门 ==")
+
+    def flat(mu=30):
+        return np.clip(rng.normal(mu, 6, (H, W)), 0, 255).astype(np.uint8)
+
+    def hline(img, y, x0=0, x1=W):
+        cv2.line(img, (x0, y), (x1 - 1, y), 245, 6)
+
+    def comp(img):
+        return checks.check_completeness(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), img,
+                                         {"bright_ratio": 0.0}, th)
+
+    img = flat(); hline(img, 30); hline(img, 1460)
+    r = comp(img)
+    check("上侧长边贴顶 + 底部强 -> pass", r["passed"], r["reason"])
+
+    img = flat(); hline(img, 160)
+    r = comp(img)
+    check("上侧长边下移 + 底部弱 -> fail",
+          not r["passed"] and "上侧" in r["reason"], r["reason"])
+
+    img = flat(); hline(img, 1460)
+    r = comp(img)
+    check("上侧不可见但底部强 -> pass（052 类）", r["passed"], r["reason"])
+
+    img = flat()
+    r = comp(img)
+    check("上侧不可见且底部弱 -> fail", not r["passed"], r["reason"])
+
+    img = flat(); hline(img, 30)
+    for x in range(0, int(W * 0.30), 20):
+        hline(img, 1460, x, x + 12)
+    r = comp(img)
+    check("066 类：上侧正常、底部暗弱 -> pass 并记录豁免",
+          r["passed"] and "dark_bottom_exempt" in r["metric"].get("long_edge", {}),
+          r["metric"].get("long_edge"))
+
+    img = flat(100); hline(img, 30)
+    r = comp(img)
+    check("上侧正常、底部完全缺失且画面不暗 -> fail",
+          not r["passed"] and "底部" in r["reason"], r["reason"])
+
+    led = np.full((800, 1600), 30, np.uint8)
+    cv2.line(led, (1150, 0), (1150, 799), 255, 10)
+    led_b = checks._strip_led_ratio(led, [700, 750, 1100], "1")
+    led_a = checks._strip_led_ratio(led, [700, 750, 1100], "2")
+    check("LED 门：亮灯侧有占比、无灯侧为 0、角色不明为 None",
+          led_b is not None and led_b > 0.005 and led_a == 0
+          and checks._strip_led_ratio(led, [700, 750, 1100], None) is None,
+          (led_a, led_b))
+
     print()
     print("ALL PASS" if ok_all else "SOME FAILED")
     sys.exit(0 if ok_all else 1)
