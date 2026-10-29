@@ -111,23 +111,29 @@ THRESHOLDS = {
     "blur_pair_roi_var_max": 25.5,           # 糊图亮区 Laplacian 方差上限
     "blur_pair_ratio_min": 2.2,              # 两张方差比下限
 
-    # ----- 3. 拍摄不全（亮像素占比上限 + 上侧金属长边被推离画面 + 底部结构兜底） -----
+    # ----- 3. 拍摄不全（上下对称：上顶梁存在/贴顶 + 下底梁位置/强度） -----
     "completeness_bright_ratio_max": 0.30,         # 亮像素占比上限（超过视为拍到支架/贴脸）
     "completeness_longedge_check_enabled": True,
     "completeness_longedge_profile_width": 512,    # 剖面下采样宽度（px）
     "completeness_longedge_grad_thresh": 40.0,     # Sobel 垂直梯度绝对值门限
-    "completeness_longedge_pos_thr": 0.25,         # 强长边挺直度门限（该行强梯度列占比）
+    "completeness_longedge_pos_thr": 0.25,         # 旧“最后一条强边”挺直度门限，仅诊断
     "completeness_longedge_bot_zone_start": 0.85,  # 底部结构带检查区间起点 [0.85, 1.0]
-    "completeness_dark_mean_max": 65.0,            # 暗图守卫：全图灰度均值低于此值视为暗帧，豁免底部 Rule A
-    # 上侧金属长边：正常应贴近画面顶部（y_top <= 0.045）；相机整体下移拍到相邻根盒时，
-    # 上侧长边会被推到画面内（y_top 0.05~0.30），同时底部结构变弱。
+    "completeness_dark_mean_max": 65.0,            # 暗图守卫：全图灰度均值低于此值视为暗帧
+    # 上侧顶梁：上 30% 内最强的水平边；正常应贴顶且足够强。
     "completeness_top_edge_check_enabled": True,
-    "completeness_top_edge_pos_thr": 0.30,         # 上侧长边的强挺直度门限（比底部 0.25 更严，避开弱纹理线）
-    "completeness_top_edge_y_max": 0.045,          # 上侧长边允许的最大归一化位置
-    "completeness_top_edge_missing_y": 0.30,       # y_top 超过此值视为“上侧长边不可见”
-    "completeness_top_edge_bot_max": 0.35,         # 上侧长边偏低时，底部挺直度低于此值才判不全
-    "completeness_top_missing_bot_max": 0.396,     # 上侧长边不可见时，底部挺直度低于此值才判不全
-    "completeness_bottom_floor": 0.15,             # 上侧正常时，底部挺直度低于此值视为下侧完全缺失
+    "completeness_top_peak_zone_end": 0.30,        # 上侧峰值搜索区间 [0, 0.30]
+    "completeness_top_peak_strength_min": 0.22,    # 顶梁挺直度下限；052/1=0.168、正常最低约 0.25
+    "completeness_top_edge_pos_thr": 0.30,         # 旧 y_top 的强边门限，仅诊断
+    "completeness_top_edge_y_max": 0.20,           # 顶梁允许的最大归一化位置
+    # 下侧底梁：下 30% 内最强的水平边，不能明显偏上；目标底梁带还不能弱到缺失。
+    "completeness_bottom_edge_check_enabled": True,
+    "completeness_bottom_peak_zone_start": 0.70,   # 下侧峰值搜索区间 [0.70, 1.0]
+    "completeness_bottom_edge_y_min": 0.868,       # 底梁位置下限；865=0.862、正常最低 0.874，取中点
+    "completeness_bottom_band_end": 0.96,          # 目标底梁带 [0.85, 0.96]
+    "completeness_bottom_strength_max": 0.35,      # 底部挺直度低于此值且底梁带也低时判缺失
+    "completeness_bottom_band_strength_min": 0.28, # 目标底梁带挺直度下限；301/2=0.275、正常 099=0.294
+    "completeness_bottom_floor": 0.15,             # 低于此值视为下侧结构完全缺失
+    "completeness_dark_exempt_bot_max": 0.25,      # 暗图豁免只允许底部挺直度 <0.25 的 066 类弱结构
 
     # ----- 4. 错位（成对：区域带相位为主 + ORB 特征匹配 + 质心兜底） -----
     "alignment_band_check_enabled": True,

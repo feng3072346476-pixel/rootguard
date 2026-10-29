@@ -2,7 +2,7 @@ r"""5472×3648 真实画幅回归：分辨率守卫 / 竖拍旋转 / C 刀口。
 
 用法：
     python scripts/regression_5472.py
-    python scripts/regression_5472.py --data D:\rootguard\data
+    python scripts/regression_5472.py --data D:\rootguard\dataed
 
 - 合成图只验证"画幅/旋转/三态"链路，不验证真实缺陷信号。
 - 若本机存在 data 目录，额外跑两组真实锚点（正常 <1000 号、纯模糊 007~014），
@@ -110,7 +110,7 @@ def check_real(data_root: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default=os.environ.get("ROOTBOX_QC_DATA", r"D:\rootguard\data"))
+    ap.add_argument("--data", default=os.environ.get("ROOTBOX_QC_DATA", r"D:\rootguard\dataed"))
     args = ap.parse_args()
     try:
         check_synthetic()

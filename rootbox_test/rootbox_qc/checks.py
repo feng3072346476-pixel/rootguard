@@ -406,14 +406,21 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
 
 
 # ---------------------------------------------------------------------------
-# 3. 拍摄不全（亮像素占比上限 + 底部金属长边结构缺失 Rule A）
+# 3. 拍摄不全（亮像素占比上限 + 上下金属长边对称判据）
 # ---------------------------------------------------------------------------
 def _long_edge_metric(gray, width=512, grad_t=40.0, pos_thr=0.25,
-                       bot_zone_start=0.85, top_pos_thr=None):
-    """上下金属长边的位置与底部区间挺直度峰值（bot_zone_max）。
+                       bot_zone_start=0.85, top_pos_thr=None,
+                       top_zone_end=0.30, bottom_zone_start=0.70,
+                       bottom_band_end=0.96):
+    """上下金属长边的位置、峰值强度与底部结构带挺直度。
 
-    top_pos_thr 单独控制“上侧长边”的挺直度门限：上侧常有板边/内框弱线，
-    用更严格的 0.30 避免把弱线误当成长边。y_bot 仍按 pos_thr 取。
+    同时保留两套读数，语义不同：
+    - y_top / y_bot：旧“第一条/最后一条强边”，只作诊断记录；
+    - top_peak_* / bottom_peak_*：上 30% / 下 30% 各自最强的水平边，
+      用来判断上、下金属长边是否存在、是否被推离画面边缘；
+    - bot_zone_max / bottom_band_max：底部结构带 [bot_zone_start, 1.0] 与
+      目标底梁带 [bot_zone_start, bottom_band_end] 的最强挺直度，
+      用来判断底部金属长边是否弱到缺失。
     """
     h0, w0 = gray.shape
     if w0 > width:
@@ -424,18 +431,37 @@ def _long_edge_metric(gray, width=512, grad_t=40.0, pos_thr=0.25,
     gy = cv2.Sobel(g, cv2.CV_32F, 0, 1, ksize=3)
     tall = np.convolve((np.abs(gy) > grad_t).mean(axis=1), np.ones(7) / 7.0, mode="same")
     h = len(tall)
+
+    top_end = max(1, min(h, int(top_zone_end * h)))
+    top_idx = int(np.argmax(tall[:top_end]))
+    bottom_start = max(0, min(h - 1, int(bottom_zone_start * h)))
+    bottom_idx = int(np.argmax(tall[bottom_start:])) + bottom_start
+
     start = max(0, min(h - 1, int(bot_zone_start * h)))
+    band_end = max(start + 1, min(h, int(bottom_band_end * h)))
     bot_zone_max = round(float(tall[start:].max()), 3)
+    band_max = round(float(tall[start:band_end].max()), 3)
+
+    out = {
+        "y_top": None,
+        "y_bot": None,
+        "bot_zone_max": bot_zone_max,
+        "bottom_band_max": band_max,
+        "top_peak_y": round(top_idx / h, 3),
+        "top_peak_strength": round(float(tall[top_idx]), 3),
+        "bottom_peak_y": round(bottom_idx / h, 3),
+        "bottom_peak_strength": round(float(tall[bottom_idx]), 3),
+    }
+
     strong = np.where(tall > pos_thr)[0]
+    if not len(strong):
+        return out
     if top_pos_thr is None:
         top_pos_thr = pos_thr
     strong_top = np.where(tall > top_pos_thr)[0]
-    if not len(strong):
-        return {"y_top": None, "y_bot": None, "bot_zone_max": bot_zone_max}
-    y_top = float(strong_top[0]) / h if len(strong_top) else None
-    y_bot = float(strong[-1]) / h
-    return {"y_top": None if y_top is None else round(y_top, 3),
-            "y_bot": round(y_bot, 3), "bot_zone_max": bot_zone_max}
+    out["y_top"] = round(float(strong_top[0]) / h, 3) if len(strong_top) else None
+    out["y_bot"] = round(float(strong[-1]) / h, 3)
+    return out
 
 
 def _seam_step_misalign(gray, th: dict | None = None) -> list | None:
@@ -479,12 +505,14 @@ def check_completeness(img_bgr, gray, frame, th: dict | None = None) -> dict:
         reasons.append(
             f"画面中金属结构过多（亮像素 {bright_ratio*100:.1f}%，疑似相机偏离或拍到支架）")
 
-    # 上侧金属长边被推离画面顶部 = 相机整体下移/拍到相邻根盒（“不全”的主判据）；
-    # 上侧正常时再用底部 Rule A 兜底下侧被裁，避免只查底边漏掉单侧裁切。
+    # 上下对称判据：上侧顶梁要贴顶且足够强；下侧底梁不能偏上，也不能弱到缺失。
+    # 旧版“上侧缺失时看底部强度”会把 052/1 这类上侧缺失、底部仍强的图放行，
+    # 已按 2026-10-29 的标注修正为上下各自独立判断。
     if bool(th.get("completeness_longedge_check_enabled", True)):
         pos_thr = float(th.get("completeness_longedge_pos_thr", 0.25))
         bot_zone_start = float(th.get("completeness_longedge_bot_zone_start", 0.85))
         top_enabled = bool(th.get("completeness_top_edge_check_enabled", True))
+        bottom_enabled = bool(th.get("completeness_bottom_edge_check_enabled", True))
         top_pos_thr = (float(th.get("completeness_top_edge_pos_thr", 0.30))
                        if top_enabled else pos_thr)
         le = _long_edge_metric(
@@ -493,7 +521,10 @@ def check_completeness(img_bgr, gray, frame, th: dict | None = None) -> dict:
             grad_t=float(th.get("completeness_longedge_grad_thresh", 40.0)),
             pos_thr=pos_thr,
             bot_zone_start=bot_zone_start,
-            top_pos_thr=top_pos_thr)
+            top_pos_thr=top_pos_thr,
+            top_zone_end=float(th.get("completeness_top_peak_zone_end", 0.30)),
+            bottom_zone_start=float(th.get("completeness_bottom_peak_zone_start", 0.70)),
+            bottom_band_end=float(th.get("completeness_bottom_band_end", 0.96)))
         metric["long_edge"] = le
         dark_mean_max = float(th.get("completeness_dark_mean_max", 65.0))
         threshold["longedge_bot_zone_start"] = bot_zone_start
@@ -502,52 +533,64 @@ def check_completeness(img_bgr, gray, frame, th: dict | None = None) -> dict:
         metric["long_edge"]["mean_gray"] = round(mean_all, 1)
 
         if top_enabled:
-            top_y_max = float(th.get("completeness_top_edge_y_max", 0.045))
-            top_missing_y = float(th.get("completeness_top_edge_missing_y", 0.30))
-            top_bot_max = float(th.get("completeness_top_edge_bot_max", 0.35))
-            top_missing_bot_max = float(th.get("completeness_top_missing_bot_max", 0.396))
+            top_min = float(th.get("completeness_top_peak_strength_min", 0.22))
+            top_y_max = float(th.get("completeness_top_edge_y_max", 0.20))
+            threshold["top_peak_strength_min"] = top_min
             threshold["top_edge_y_max"] = top_y_max
-            threshold["top_edge_missing_y"] = top_missing_y
-            threshold["top_edge_bot_max"] = top_bot_max
-            threshold["top_missing_bot_max"] = top_missing_bot_max
-            yt, bot = le["y_top"], le["bot_zone_max"]
-            if yt is None or yt > top_missing_y:
-                if bot < top_missing_bot_max:
-                    yt_txt = "未检出" if yt is None else f"{yt:.3f}"
-                    reasons.append(
-                        f"上侧金属长边缺失/被推离画面顶部（上侧长边位置 {yt_txt}，"
-                        f"阈值 {top_missing_y:.2f}；底部挺直度 {bot:.3f} < "
-                        f"{top_missing_bot_max:.3f}），疑似拍进相邻根盒")
-            elif yt > top_y_max and bot < top_bot_max:
+            ts, ty = le["top_peak_strength"], le["top_peak_y"]
+            if ts < top_min:
                 reasons.append(
-                    f"上侧金属长边被推离画面边缘（y_top={yt:.3f} > {top_y_max:.3f}；"
-                    f"底部挺直度 {bot:.3f} < {top_bot_max:.2f}），疑似拍进相邻根盒")
+                    f"上侧金属长边缺失/未拍到（顶梁挺直度 {ts:.3f} < {top_min:.2f}），"
+                    "疑似相机偏到相邻根盒或未拍全根盒上侧")
+            elif ty > top_y_max:
+                reasons.append(
+                    f"上侧金属长边被推离画面顶部（顶梁位置 {ty:.3f} > {top_y_max:.2f}），"
+                    "疑似拍进相邻根盒")
 
-        bottom_floor = float(th.get("completeness_bottom_floor", 0.15))
-        threshold["bottom_floor"] = bottom_floor
-        if not reasons:
-            if le["y_top"] is None:
-                if not top_enabled:
-                    undetermined.append("未找到上下金属长边，底部结构判据不可用")
-            elif le["bot_zone_max"] < pos_thr:
-                if le["bot_zone_max"] < bottom_floor:
+        if bottom_enabled:
+            bottom_floor = float(th.get("completeness_bottom_floor", 0.15))
+            bottom_y_min = float(th.get("completeness_bottom_edge_y_min", 0.868))
+            bottom_strength_max = float(th.get("completeness_bottom_strength_max", 0.35))
+            band_min = float(th.get("completeness_bottom_band_strength_min", 0.28))
+            dark_exempt_bot_max = float(th.get("completeness_dark_exempt_bot_max", 0.25))
+            threshold["bottom_floor"] = bottom_floor
+            threshold["bottom_edge_y_min"] = bottom_y_min
+            threshold["bottom_strength_max"] = bottom_strength_max
+            threshold["bottom_band_strength_min"] = band_min
+            threshold["dark_exempt_bot_max"] = dark_exempt_bot_max
+
+            bot, band = le["bot_zone_max"], le["bottom_band_max"]
+            by = le["bottom_peak_y"]
+            if by < bottom_y_min:
+                reasons.append(
+                    f"底部金属长边被推离画面底部/明显偏上（底梁位置 {by:.3f} < "
+                    f"{bottom_y_min:.2f}），疑似未拍全根盒下侧")
+
+            if bot < bottom_strength_max and band < band_min:
+                if (mean_all < dark_mean_max and band >= bottom_floor
+                        and bot < dark_exempt_bot_max):
+                    metric["long_edge"]["dark_bottom_exempt"] = (
+                        f"均值 {mean_all:.1f} < {dark_mean_max:.0f}，底部挺直度 {bot:.2f} "
+                        f"与底部带 {band:.2f} 均偏低，但上侧长边正常且底部仍有弱结构")
+                else:
                     reasons.append(
-                        f"底部金属长边结构完全缺失（底部挺直度 {le['bot_zone_max']:.3f} < "
-                        f"{bottom_floor:.2f}），疑似未拍全根盒下侧")
-                elif mean_all < dark_mean_max:
-                    if top_enabled:
-                        metric["long_edge"]["dark_bottom_exempt"] = (
-                            f"均值 {mean_all:.1f} < {dark_mean_max:.0f}，"
-                            f"底部挺直度 {le['bot_zone_max']:.2f} 偏低，但上侧长边位置正常")
-                    else:
-                        undetermined.append(
-                            f"画面过暗（均值 {mean_all:.1f} < {dark_mean_max:.0f}），"
-                            f"底部挺直度 {le['bot_zone_max']:.2f} 不可信")
+                        f"底部金属长边结构缺失/不明显（底部挺直度 {bot:.3f} < "
+                        f"{bottom_strength_max:.2f} 且目标底梁带 {band:.3f} < {band_min:.2f}），"
+                        "疑似未拍全根盒下侧")
+            elif bot < bottom_floor:
+                reasons.append(
+                    f"底部金属长边结构完全缺失（底部挺直度 {bot:.3f} < "
+                    f"{bottom_floor:.2f}），疑似未拍全根盒下侧")
+            elif bot < pos_thr:
+                if mean_all < dark_mean_max:
+                    metric["long_edge"]["dark_bottom_exempt"] = (
+                        f"均值 {mean_all:.1f} < {dark_mean_max:.0f}，"
+                        f"底部挺直度 {bot:.2f} 偏低，但上侧长边位置正常")
                 else:
                     step = _seam_step_misalign(gray, th)
                     if step is None:
                         reasons.append(
-                            f"底部无金属长边结构（底部区挺直度峰值 {le['bot_zone_max']:.3f} < "
+                            f"底部无金属长边结构（底部区挺直度峰值 {bot:.3f} < "
                             f"{pos_thr:.2f}），疑似未拍全根盒下侧")
                     else:
                         metric["long_edge"]["seam_step_exempt"] = step

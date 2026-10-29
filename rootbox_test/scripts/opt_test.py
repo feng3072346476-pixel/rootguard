@@ -369,7 +369,7 @@ try:
           (rep_mis_nodir.status, rep_mis_nodir.stitched_status,
            rep_mis_nodir.recapture_reasons[-1:]))
 
-    print("== 10. 不全：上侧长边主判据 + 底部兜底；模糊 LED 门 ==")
+    print("== 10. 不全：上下对称（顶梁存在/贴顶 + 底梁位置/强度）；模糊 LED 门 ==")
 
     def flat(mu=30):
         return np.clip(rng.normal(mu, 6, (H, W)), 0, 255).astype(np.uint8)
@@ -385,14 +385,15 @@ try:
     r = comp(img)
     check("上侧长边贴顶 + 底部强 -> pass", r["passed"], r["reason"])
 
-    img = flat(); hline(img, 160)
+    img = flat(); hline(img, 360); hline(img, 1460)
     r = comp(img)
-    check("上侧长边下移 + 底部弱 -> fail",
+    check("上侧顶梁下移超过 20% -> fail",
           not r["passed"] and "上侧" in r["reason"], r["reason"])
 
     img = flat(); hline(img, 1460)
     r = comp(img)
-    check("上侧不可见但底部强 -> pass（052 类）", r["passed"], r["reason"])
+    check("上侧顶梁缺失、底部强 -> fail（052/1 已确认不全）",
+          not r["passed"] and "上侧" in r["reason"], r["reason"])
 
     img = flat()
     r = comp(img)
@@ -409,6 +410,18 @@ try:
     img = flat(100); hline(img, 30)
     r = comp(img)
     check("上侧正常、底部完全缺失且画面不暗 -> fail",
+          not r["passed"] and "底部" in r["reason"], r["reason"])
+
+    img = flat(); hline(img, 30); hline(img, 1300)
+    r = comp(img)
+    check("底梁位置偏上到 81% -> fail",
+          not r["passed"] and "底部" in r["reason"], r["reason"])
+
+    img = flat(); hline(img, 30)
+    for x in range(0, int(W * 0.10), 20):
+        hline(img, 1500, x, x + 4)
+    r = comp(img)
+    check("目标底梁带过弱 -> fail",
           not r["passed"] and "底部" in r["reason"], r["reason"])
 
     led = np.full((800, 1600), 30, np.uint8)
