@@ -125,6 +125,15 @@ THRESHOLDS = {
     "completeness_top_peak_strength_min": 0.22,    # 顶梁挺直度下限；052/1=0.168、正常最低约 0.25
     "completeness_top_edge_pos_thr": 0.30,         # 旧 y_top 的强边门限，仅诊断
     "completeness_top_edge_y_max": 0.20,           # 顶梁允许的最大归一化位置
+    # 顶部覆盖：成品图中板面（土壤色）起点不能太靠上，否则说明顶部金属横梁被裁。
+    # 727 的板面起点 0.0645；正常 508 为 0.0792、782 0.085，取两者中点 0.072。
+    "completeness_top_cover_check_enabled": True,
+    "completeness_top_cover_y_min": 0.072,         # 板面起点下限；低于此值判顶部被裁
+    "completeness_top_cover_hue_min": 5,           # 土壤/板面 HSV 色相下限
+    "completeness_top_cover_hue_max": 45,          # 土壤/板面 HSV 色相上限
+    "completeness_top_cover_sat_min": 45,          # 土壤/板面饱和度下限
+    "completeness_top_cover_val_min": 25,          # 土壤/板面亮度下限
+    "completeness_top_cover_frac_min": 0.45,       # 单行土壤像素占比达到此值视为板面开始
     # 下侧底梁：下 30% 内最强的水平边，不能明显偏上；目标底梁带还不能弱到缺失。
     "completeness_bottom_edge_check_enabled": True,
     "completeness_bottom_peak_zone_start": 0.70,   # 下侧峰值搜索区间 [0.70, 1.0]

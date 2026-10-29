@@ -464,6 +464,37 @@ def _long_edge_metric(gray, width=512, grad_t=40.0, pos_thr=0.25,
     return out
 
 
+def _top_cover_y(img_bgr, hue_min=5, hue_max=45, sat_min=45, val_min=25,
+                 frac_min=0.45, width=512, hold=12) -> float | None:
+    """成品图中板面（土壤色）第一次出现的归一化行位置。
+
+    顶部金属横梁被裁时，褐色板面会更早出现（727 约 0.065，正常 508 约 0.079）。
+    只对成品平图/拼接图使用；原图 2.png 的接缝侧允许没有完整顶梁。
+    """
+    if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
+        return None
+    if getattr(img_bgr, "ndim", 0) == 2:
+        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_GRAY2BGR)
+    elif img_bgr.shape[2] == 4:
+        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+    h, w = img_bgr.shape[:2]
+    if w > width:
+        img = cv2.resize(img_bgr, (width, max(1, int(h * width / w))),
+                         interpolation=cv2.INTER_AREA)
+    else:
+        img = img_bgr
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    H, S, V = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+    mask = ((H >= int(hue_min)) & (H <= int(hue_max))
+            & (S >= int(sat_min)) & (V >= int(val_min)))
+    frac = mask.mean(axis=1).astype(np.float32)
+    frac = np.convolve(frac, np.ones(5) / 5, mode="same")
+    n = len(frac)
+    for i in range(max(0, n - hold)):
+        if frac[i] > frac_min and frac[i:i + hold].mean() > frac_min:
+            return round(float(i) / n, 4)
+    return None
+
 def _seam_step_misalign(gray, th: dict | None = None) -> list | None:
     """缝台阶错位：本图是否存在"同一根盒跨拼缝上下错开"的自洽缝组。
 
@@ -504,6 +535,25 @@ def check_completeness(img_bgr, gray, frame, th: dict | None = None) -> dict:
     if bright_ratio > bf_max:
         reasons.append(
             f"画面中金属结构过多（亮像素 {bright_ratio*100:.1f}%，疑似相机偏离或拍到支架）")
+
+    # 顶部覆盖：成品图中板面起点太靠上，说明顶部金属横梁被裁（727 类）。
+    # 只对成品平图/拼接图使用；原图 1/2 的接缝侧不套用。
+    if (bool(th.get("completeness_top_cover_check_enabled", True))
+            and th.get("input_kind") == "mosaic"):
+        cover_min = float(th.get("completeness_top_cover_y_min", 0.072))
+        cover_y = _top_cover_y(
+            img_bgr,
+            hue_min=int(th.get("completeness_top_cover_hue_min", 5)),
+            hue_max=int(th.get("completeness_top_cover_hue_max", 45)),
+            sat_min=int(th.get("completeness_top_cover_sat_min", 45)),
+            val_min=int(th.get("completeness_top_cover_val_min", 25)),
+            frac_min=float(th.get("completeness_top_cover_frac_min", 0.45)))
+        metric["top_cover_y"] = cover_y
+        threshold["top_cover_y_min"] = cover_min
+        if cover_y is not None and cover_y < cover_min:
+            reasons.append(
+                f"顶部金属横梁过窄/被裁（板面起点 y={cover_y:.3f} < {cover_min:.3f}），"
+                "疑似未拍全根盒上侧")
 
     # 上下对称判据：上侧顶梁要贴顶且足够强；下侧底梁不能偏上，也不能弱到缺失。
     # 旧版“上侧缺失时看底部强度”会把 052/1 这类上侧缺失、底部仍强的图放行，

@@ -381,6 +381,30 @@ try:
         return checks.check_completeness(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), img,
                                          {"bright_ratio": 0.0}, th)
 
+    def comp_mosaic(img_bgr):
+        tth = dict(th)
+        tth["input_kind"] = "mosaic"
+        return checks.check_completeness(img_bgr, cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY),
+                                         {"bright_ratio": 0.0}, tth)
+
+    def mosaic_img(top_h):
+        img = np.zeros((H, W, 3), np.uint8)
+        img[:, :] = (30, 70, 110)  # 褐色板面
+        img[:top_h, :] = (115, 115, 115)  # 顶部灰色金属横梁
+        cv2.line(img, (0, top_h), (W - 1, top_h), (245, 245, 245), 6)
+        cv2.line(img, (0, 1460), (W - 1, 1460), (245, 245, 245), 6)
+        return img
+
+    r = comp_mosaic(mosaic_img(160))
+    check("成品图顶部横梁足够（板面起点 10%）-> pass", r["passed"], r["reason"])
+
+    r = comp_mosaic(mosaic_img(80))
+    check("成品图顶部横梁过窄（板面起点 5%）-> fail（727 类）",
+          not r["passed"] and "顶部" in r["reason"], r["reason"])
+
+    r = comp(cv2.cvtColor(mosaic_img(80), cv2.COLOR_BGR2GRAY))
+    check("原图不套用顶部覆盖判据", r["passed"], r["reason"])
+
     img = flat(); hline(img, 30); hline(img, 1460)
     r = comp(img)
     check("上侧长边贴顶 + 底部强 -> pass", r["passed"], r["reason"])
