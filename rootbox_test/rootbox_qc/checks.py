@@ -464,6 +464,36 @@ def _long_edge_metric(gray, width=512, grad_t=40.0, pos_thr=0.25,
     return out
 
 
+def _right_metal_fraction(img_bgr, band_frac=0.02, hue_min=80, hue_max=130,
+                         sat_min=15, val_min=35, width=800) -> float | None:
+    """画面最右侧窄带内蓝灰金属外框的像素占比。
+
+    成品平图/拼接图正常应拍到右侧灰色金属外框；727 这类右侧被裁的图，
+    最右 2% 基本是褐色板面/玻璃，蓝灰金属占比显著偏低。
+    原图 1/2 的接缝侧允许缺框，因此调用方只在 input_kind=mosaic 时使用。
+    """
+    if img_bgr is None or getattr(img_bgr, "size", 0) == 0:
+        return None
+    if getattr(img_bgr, "ndim", 0) == 2:
+        return None  # 灰度成品图没有色相，无法判蓝灰外框；交给人/其它判据
+    if img_bgr.shape[2] == 4:
+        img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_BGRA2BGR)
+    h, w = img_bgr.shape[:2]
+    if w > width:
+        img = cv2.resize(img_bgr, (width, max(1, int(h * width / w))),
+                         interpolation=cv2.INTER_AREA)
+    else:
+        img = img_bgr
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hh, ww = hsv.shape[:2]
+    x0 = max(0, min(ww - 1, int(round(ww * (1.0 - float(band_frac))))))
+    band = hsv[:, x0:]
+    H, S, V = band[:, :, 0], band[:, :, 1], band[:, :, 2]
+    metal = ((H >= int(hue_min)) & (H <= int(hue_max))
+             & (S >= int(sat_min)) & (V >= int(val_min)))
+    return round(float(metal.mean()), 3)
+
+
 def _seam_step_misalign(gray, th: dict | None = None) -> list | None:
     """缝台阶错位：本图是否存在"同一根盒跨拼缝上下错开"的自洽缝组。
 
@@ -504,6 +534,24 @@ def check_completeness(img_bgr, gray, frame, th: dict | None = None) -> dict:
     if bright_ratio > bf_max:
         reasons.append(
             f"画面中金属结构过多（亮像素 {bright_ratio*100:.1f}%，疑似相机偏离或拍到支架）")
+
+    # 成品平图/拼接图的右侧外框：原图 1/2 的接缝侧允许缺框，不能套用。
+    if (bool(th.get("completeness_side_edge_check_enabled", True))
+            and th.get("input_kind") == "mosaic"):
+        right_min = float(th.get("completeness_right_metal_fraction_min", 0.35))
+        rm = _right_metal_fraction(
+            img_bgr,
+            band_frac=float(th.get("completeness_side_band_frac", 0.02)),
+            hue_min=int(th.get("completeness_side_metal_hue_min", 80)),
+            hue_max=int(th.get("completeness_side_metal_hue_max", 130)),
+            sat_min=int(th.get("completeness_side_metal_sat_min", 15)),
+            val_min=int(th.get("completeness_side_metal_val_min", 35)))
+        metric["right_metal_ratio"] = rm
+        threshold["right_metal_fraction_min"] = right_min
+        if rm is not None and rm < right_min:
+            reasons.append(
+                f"右侧金属外框缺失/被裁（右侧2%蓝灰金属占比 {rm:.3f} < {right_min:.2f}），"
+                "疑似未拍全根盒右侧")
 
     # 上下对称判据：上侧顶梁要贴顶且足够强；下侧底梁不能偏上，也不能弱到缺失。
     # 旧版“上侧缺失时看底部强度”会把 052/1 这类上侧缺失、底部仍强的图放行，

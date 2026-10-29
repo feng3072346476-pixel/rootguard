@@ -381,6 +381,27 @@ try:
         return checks.check_completeness(cv2.cvtColor(img, cv2.COLOR_GRAY2BGR), img,
                                          {"bright_ratio": 0.0}, th)
 
+    def comp_mosaic(img_bgr):
+        tth = dict(th)
+        tth["input_kind"] = "mosaic"
+        return checks.check_completeness(img_bgr, cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY),
+                                         {"bright_ratio": 0.0}, tth)
+
+    img = flat(); hline(img, 30); hline(img, 1460)
+    bgr = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    bgr[:, -int(W * 0.02):] = (140, 120, 110)  # 蓝灰金属外框
+    r = comp_mosaic(bgr)
+    check("成品图右侧有蓝灰金属外框 -> pass", r["passed"], r["reason"])
+
+    bgr_bad = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    bgr_bad[:, -int(W * 0.02):] = (30, 70, 110)  # 褐色板面顶到右缘
+    r = comp_mosaic(bgr_bad)
+    check("成品图右侧外框缺失 -> fail（727 类）",
+          not r["passed"] and "右侧" in r["reason"], r["reason"])
+
+    r = comp(cv2.cvtColor(bgr_bad, cv2.COLOR_BGR2GRAY))
+    check("原图/接缝侧不套用右侧外框判据", r["passed"], r["reason"])
+
     img = flat(); hline(img, 30); hline(img, 1460)
     r = comp(img)
     check("上侧长边贴顶 + 底部强 -> pass", r["passed"], r["reason"])
