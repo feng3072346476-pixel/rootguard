@@ -134,15 +134,6 @@ THRESHOLDS = {
     "completeness_bottom_band_strength_min": 0.28, # 目标底梁带挺直度下限；301/2=0.275、正常 099=0.294
     "completeness_bottom_floor": 0.15,             # 低于此值视为下侧结构完全缺失
     "completeness_dark_exempt_bot_max": 0.25,      # 暗图豁免只允许底部挺直度 <0.25 的 066 类弱结构
-    # 成品平图/拼接图的右侧金属外框：原图 1/2 的接缝侧允许缺框，成品图不允许。
-    # 727=0.293、113=0.066、389=0.015；正常成品最低 805=0.443、066=0.737。
-    "completeness_side_edge_check_enabled": True,
-    "completeness_side_band_frac": 0.02,           # 只取画面最右侧 2% 列
-    "completeness_side_metal_hue_min": 80,         # OpenCV H，蓝灰金属外框
-    "completeness_side_metal_hue_max": 130,
-    "completeness_side_metal_sat_min": 15,
-    "completeness_side_metal_val_min": 35,
-    "completeness_right_metal_fraction_min": 0.35, # 右侧 2% 蓝灰金属像素占比下限
 
     # ----- 4. 错位（成对：区域带相位为主 + ORB 特征匹配 + 质心兜底） -----
     "alignment_band_check_enabled": True,
