@@ -31,6 +31,9 @@
   损坏/模糊/不全/单张错位。生产**必须**设 `ROOTBOX_QC_STITCH_DIR`（或
   `cfg["paths"]["stitch_output_dir"]`），否则默认只完成前两步，
   `stitched_status=None`，不是完整流程。
+- **重拍后报告**：同一 pair 的多次 attempt 交给同一个 `RecaptureTracker.observe()`，
+  报告新增 `retry` 块（重拍次数、首末状态、首拍原因、每次尝试明细）；
+  `FileNotifier` 在 `attempt>1` 或转人工时写 `<pair_id>_retry.json`。
 - **不全判据（2026-10-29 改为上下对称 + 成品顶部覆盖，按 066 蓝框）**：
   上、下两条金属长边都要在画面内。上 30% 内最强水平边挺直度 `<0.22`、或
   位置 `>0.20` 判不全（顶部没拍到/被推离）；下 30% 内最强水平边位置
@@ -145,11 +148,56 @@ else:
 `QCReport.status`：`pass` / `fail` / `undetermined`。JSON 报告同时保留
 `recapture_needed`、`reasons`、`targets` 兼容字段，并新增 `status`。
 成对报告另有 `stitched_status`（`pass` / `fail` / `undetermined` / `None`）、
-`stitched_checks`、`stitch_error`、`stitched_path`。
+`stitched_checks`、`stitch_error`、`stitched_path`。所有报告还含 `retry`
+重拍汇总（见下）。
 
 触发重拍的出口：`notifier.py` 的 HttpNotifier（POST JSON 到小车 REST，标准库实现，
 失败重试但不影响判检）或轮询 `results/recapture_queue.jsonl`（每行一条，
 字段：pair_id / reasons / targets / attempt / timestamp，超 5MB 自动轮转）。
+
+### 重拍后报告（retry）
+
+同一个 pair 每次重拍后，把 `QCReport` 交给同一个 `RecaptureTracker` 登记；
+报告里的 `retry` 块会保留首拍原因、每次尝试的状态和最终结果：
+
+```python
+from rootbox_qc.verify import RecaptureTracker
+
+tracker = RecaptureTracker(max_attempts=3)   # 同 pair 多轮必须复用同一个 tracker
+pair_id = "001"                               # 同一物理根盒/批次，重拍前后保持不变
+attempt = tracker.next_attempt(pair_id)       # 首次为 1；重拍后为 2、3...
+rep = verify_single(path, cfg, pair_id=pair_id, attempt=attempt, input_kind="raw")
+tracker.observe(rep)
+print(rep.retry_report())                     # 也可直接读 rep.to_dict()["retry"]
+```
+
+`retry` 字段：
+
+| 字段 | 含义 |
+|------|------|
+| `retake_count` | 重拍次数 = `attempt - 1`（首拍为 0） |
+| `attempts_total` / `max_attempts` | 已记录次数 / 熔断上限 |
+| `first_status` / `final_status` | 首个已记录状态 / 本次最终状态（`history_complete=true` 时首个即首拍） |
+| `resolved` / `retake_succeeded` | 最终是否通过 / 是否“重拍后通过” |
+| `escalated` | 是否已达上限转人工/停机 |
+| `first_reasons` / `final_reasons` | 首拍原因 / 本次原因 |
+| `failure_categories` | 历次命中的故障类别（损坏/模糊/不全/错位/重复拍摄/其它） |
+| `attempts[]` | 每次尝试的 attempt、scope(single/pair)、status、reasons、targets、categories、images、stitched_status、timestamp |
+| `history_complete` | 是否从 attempt=1 连续记录；未复用 tracker 或从磁盘恢复时可能为 false |
+| `systemic_alert` | 连续同类故障的系统性告警（若有） |
+| `first_timestamp` / `final_timestamp` | 首拍 / 本次时间 |
+
+文件出口（`FileNotifier`）：每次仍写 `<pair_id>.json`；`attempt>1` 另写
+`<pair_id>_attempt<N>.json`；`attempt>1` 或已转人工时再写
+`<pair_id>_retry.json`（上述 retry 汇总 + `final_report` 指向最终报告文件）。
+`retry` 块在每次报告里都存在，批量只跑一次时表现为 `retake_count=0`、
+`attempts_total=1`。
+
+> 注意：`attempt` 必须由调用方在重拍后递增；同一个 tracker 要跨轮复用，
+> 否则新 tracker 没有首拍历史，`history_complete` 会是 false。
+> `pair_id` 不要用默认的 `1` / `2` 文件主干充当重拍 ID（会把 A/B 单图历史混在一起）；
+> 同一物理根盒用同一个 ID。若 A、B 两张单图各自独立重拍，用 `<pair_id>_a` /
+> `<pair_id>_b` 分开登记，成对复检再用 `<pair_id>`。
 
 ```python
 NOTIFIER = {"type": "http", "url": "http://<小车IP>:8080/qc/recapture", "timeout": 5, "retries": 2}

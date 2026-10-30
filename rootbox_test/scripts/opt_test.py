@@ -1,4 +1,5 @@
 """五类生产检测与架构特性的专项功能验证（合成图）。"""
+import json
 import os
 import shutil
 import sys
@@ -259,6 +260,51 @@ try:
           os.path.isfile(os.path.join(q_dir, "box_002_attempt2.json")))
     check("连续 3 组同类失败触发 systemic_alert",
           bool(r_trk.systemic_alert and "模糊连续3组" in r_trk.systemic_alert), r_trk.systemic_alert)
+
+    # 重拍后报告：同一 pair 首拍失败 -> 二拍通过，必须保留首拍原因与首末状态
+    tracker_retry = RecaptureTracker(max_attempts=2)
+    retry_id = "retry_case"
+    r_first = QCReport(
+        pair_id=retry_id, status="fail",
+        recapture_needed=True,
+        recapture_reasons=["[1.png] 模糊（首拍）"],
+        recapture_targets=["1.png"],
+        attempt=1,
+        images=[ImageResult(path="1.png",
+                            checks=[checks._fail("blur", {}, {}, "首拍模糊")])],
+    )
+    tracker_retry.observe(r_first)
+    r_second = QCReport(
+        pair_id=retry_id, status="pass", attempt=2,
+        images=[ImageResult(path="1.png", checks=[checks._ok("blur", {}, {})])],
+    )
+    tracker_retry.observe(r_second)
+    retry = r_second.to_dict()["retry"]
+    check("重拍后报告：次数/首末状态/首拍原因",
+          retry["retake_count"] == 1 and retry["attempts_total"] == 2
+          and retry["first_status"] == "fail" and retry["final_status"] == "pass"
+          and retry["first_reasons"] == ["[1.png] 模糊（首拍）"],
+          retry)
+    check("重拍后报告：重拍成功/类别/历史完整",
+          retry["retake_succeeded"] and retry["resolved"] and not retry["escalated"]
+          and retry["failure_categories"] == ["模糊"]
+          and retry["history_complete"]
+          and [a["status"] for a in retry["attempts"]] == ["fail", "pass"]
+          and [a["scope"] for a in retry["attempts"]] == ["single", "single"],
+          retry)
+    fn.notify(r_second.to_dict())
+    retry_path = os.path.join(q_dir, f"{retry_id}_retry.json")
+    retry_disk = {}
+    if os.path.isfile(retry_path):
+        with open(retry_path, encoding="utf-8") as f:
+            retry_disk = json.load(f)
+    check("重拍后写出 _retry.json 且指向最终报告",
+          retry_disk.get("retake_count") == 1
+          and retry_disk.get("first_status") == "fail"
+          and retry_disk.get("final_status") == "pass"
+          and retry_disk.get("final_report") == f"{retry_id}.json"
+          and len(retry_disk.get("attempts", [])) == 2,
+          retry_disk)
 
     ra_same = checks.check_alignment_pair(orig, orig, fa, fa, th, path_a=p1, path_b=p2)
     check("字节相同重复图在 alignment_pair 中互斥跳过",

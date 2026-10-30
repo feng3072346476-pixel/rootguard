@@ -74,16 +74,64 @@ class QCReport:
     stitch_error: str | None = None   # 拼接脚本缺失/执行失败时的明确错误
     stitched_status: str | None = None  # 拼接成品复检的三态；None=未启用/未执行
     stitched_checks: list = field(default_factory=list)  # 拼接成品上的单图检查明细
+    # 同一 pair 的历次重拍摘要；由 RecaptureTracker.observe() 合并。
+    # 不直接进报告顶层（to_dict 会取出并整理成 retry 块），避免与 retry 重复。
+    attempt_history: list = field(default_factory=list, repr=False)
     timestamp: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S"))
+
+    def retry_report(self) -> dict:
+        """重拍后报告：重拍次数、首末状态、每次原因与故障类别。
+
+        以 attempt=1 为首次拍摄，retake_count = attempt-1。即使调用方没有使用
+        RecaptureTracker，也会把当前 attempt 作为唯一一条历史，字段仍可用；
+        但只有复用同一个 tracker 并逐次 observe，历史才是完整的
+        （history_complete=True）。历史不完整时 first_* 是最早一条已记录，
+        不一定是真正的首拍。
+        """
+        attempts = [dict(a) for a in self.attempt_history
+                    if int(a.get("attempt", 0) or 0) != int(self.attempt or 1)]
+        attempts.append(_attempt_summary(self))
+        attempts.sort(key=lambda a: int(a.get("attempt", 0) or 0))
+        first = attempts[0]
+        attempt = int(self.attempt or 1)
+        ordered = [n for n in CATEGORY_ORDER
+                   if any(n in a.get("categories", []) for a in attempts)]
+        extra = sorted({c for a in attempts for c in a.get("categories", [])
+                        if c not in CATEGORY_ORDER})
+        retake_count = max(0, attempt - 1)
+        return {
+            "pair_id": self.pair_id,
+            "retake_count": retake_count,
+            "attempts_total": len(attempts),
+            "max_attempts": self.max_attempts,
+            "history_complete": (
+                len(attempts) == attempt
+                and int(first.get("attempt", 0) or 0) == 1
+            ),
+            "first_status": first.get("status"),
+            "final_status": self.status,
+            "resolved": self.status == "pass",
+            "retake_succeeded": retake_count > 0 and self.status == "pass",
+            "escalated": bool(self.escalate_manual),
+            "first_reasons": list(first.get("reasons", [])),
+            "final_reasons": list(self.recapture_reasons),
+            "failure_categories": ordered + extra,
+            "attempts": attempts,
+            "systemic_alert": self.systemic_alert,
+            "first_timestamp": first.get("timestamp"),
+            "final_timestamp": self.timestamp,
+        }
 
     def to_dict(self) -> dict:
         d = asdict(self)
+        d.pop("attempt_history", None)   # 只通过 retry.attempts 暴露，避免重复
         d["status"] = self.status
         d["passed"] = self.status == "pass"
         # 对外文档契约（README）：重拍队列 / HTTP 消费方读 reasons / targets，
         # 与内部字段名 recapture_reasons / recapture_targets 保持一致别名
         d["reasons"] = self.recapture_reasons
         d["targets"] = self.recapture_targets
+        d["retry"] = self.retry_report()
         return d
 
 
@@ -603,6 +651,36 @@ def failed_checks(report: QCReport) -> list:
     return out
 
 
+def _attempt_summary(report: QCReport) -> dict:
+    """一次 attempt 的可留档摘要（供 retry.attempts 与文件留档使用）。"""
+    fails = failed_checks(report)
+    cats = {f["category"] for f in fails}
+    ordered = [n for n in CATEGORY_ORDER if n in cats]
+    extra = sorted(cats - set(CATEGORY_ORDER))
+    return {
+        "attempt": int(report.attempt or 1),
+        "retake_index": max(0, int(report.attempt or 1) - 1),
+        "scope": "pair" if len(report.images) > 1 else "single",
+        "status": report.status,
+        "recapture_needed": bool(report.recapture_needed),
+        "reasons": list(report.recapture_reasons),
+        "targets": list(report.recapture_targets),
+        "categories": ordered + extra,
+        "images": [
+            {
+                "path": r.path,
+                "status": r.status,
+                "input_kind": getattr(r, "input_kind", None),
+            }
+            for r in report.images
+        ],
+        "stitched_status": report.stitched_status,
+        "escalate_manual": bool(report.escalate_manual),
+        "systemic_alert": report.systemic_alert,
+        "timestamp": report.timestamp,
+    }
+
+
 def _as_cfg(cfg: dict | None) -> dict:
     """接受完整 config（含缺字段时补齐）或纯阈值 dict（旧调用兼容）。"""
     base = load_config()
@@ -642,13 +720,18 @@ class RecaptureTracker:
         )
         self.pair_attempts: dict[str, int] = {}
         self.consecutive_by_cat: dict[str, int] = {}
+        # pair_id -> 历次 attempt 摘要；同一 tracker 跨重拍复用才能得到完整历史
+        self.attempt_history: dict[str, list[dict]] = {}
 
     def next_attempt(self, pair_id: str) -> int:
         """返回某个 pair_id 下一次质检对应的 attempt 序号（从 1 起）。"""
         return self.pair_attempts.get(pair_id, 0) + 1
 
     def observe(self, report: QCReport) -> QCReport:
-        """登记一次质检结果，更新 report.escalate_manual 与 report.systemic_alert。"""
+        """登记一次质检结果，更新 report 的熔断状态与重拍历史。
+
+        注意：report.attempt 必须由调用方在重拍后递增（同 pair 复用本 tracker）。
+        """
         pid = report.pair_id
         self.pair_attempts[pid] = max(self.pair_attempts.get(pid, 0), report.attempt)
         report.max_attempts = self.max_attempts
@@ -656,24 +739,37 @@ class RecaptureTracker:
             report.recapture_needed and report.attempt >= report.max_attempts
         )
 
-        if not report.recapture_needed:
+        if report.recapture_needed:
+            cats = {f["category"] for f in failed_checks(report)}
+            # 仅保留本次仍出现的类别计数，其余清零
+            for c in list(self.consecutive_by_cat.keys()):
+                if c not in cats:
+                    del self.consecutive_by_cat[c]
+            triggered = []
+            for c in sorted(cats):
+                cnt = self.consecutive_by_cat.get(c, 0) + 1
+                self.consecutive_by_cat[c] = cnt
+                if self.max_consecutive > 0 and cnt >= self.max_consecutive:
+                    triggered.append(f"{c}连续{cnt}组")
+            if triggered and not report.systemic_alert:
+                report.systemic_alert = (
+                    f"疑似系统性故障（{'、'.join(triggered)}失败），建议暂停重拍并检查灯光/相机/导轨"
+                )
+        else:
             self.consecutive_by_cat.clear()
-            return report
 
-        cats = {f["category"] for f in failed_checks(report)}
-        # 仅保留本次仍出现的类别计数，其余清零
-        for c in list(self.consecutive_by_cat.keys()):
-            if c not in cats:
-                del self.consecutive_by_cat[c]
-        triggered = []
-        for c in sorted(cats):
-            cnt = self.consecutive_by_cat.get(c, 0) + 1
-            self.consecutive_by_cat[c] = cnt
-            if self.max_consecutive > 0 and cnt >= self.max_consecutive:
-                triggered.append(f"{c}连续{cnt}组")
-        if triggered and not report.systemic_alert:
-            report.systemic_alert = (
-                f"疑似系统性故障（{'、'.join(triggered)}失败），建议暂停重拍并检查灯光/相机/导轨"
-            )
+        self._remember(report)
         return report
+
+    def _remember(self, report: QCReport) -> None:
+        """把本次 attempt 摘要并入 report 与 tracker 的逐对历史（同一 attempt 去重）。"""
+        pid = report.pair_id
+        # tracker 是权威来源；新 tracker 遇到已带 history 的 report（如从磁盘恢复）时沿用
+        prior = list(self.attempt_history.get(pid, [])) or list(report.attempt_history)
+        merged = [dict(a) for a in prior
+                  if int(a.get("attempt", 0) or 0) != int(report.attempt or 1)]
+        merged.append(_attempt_summary(report))
+        merged.sort(key=lambda a: int(a.get("attempt", 0) or 0))
+        report.attempt_history = merged
+        self.attempt_history[pid] = [dict(a) for a in merged]
 

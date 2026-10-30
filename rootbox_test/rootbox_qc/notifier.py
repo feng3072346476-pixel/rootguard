@@ -10,6 +10,9 @@
     {"pair_id": "...", "reasons": [...], "targets": [...], "attempt": 1,
      "timestamp": "..."}
 拍照控制端读取队列（或直接收 HTTP）后执行重拍，同 pair 的 attempt+1。
+
+重拍后报告：FileNotifier 在 attempt>1 或已转人工时另写
+<pair_id>_retry.json（report["retry"] 的汇总 + final_report 文件名）。
 """
 from __future__ import annotations
 
@@ -32,7 +35,11 @@ class Notifier(ABC):
 
 
 class FileNotifier(Notifier):
-    """每对一份 JSON 报告 + 需重拍追加到队列文件（超限自动轮转 .1）。"""
+    """每对一份 JSON 报告 + 需重拍追加到队列文件（超限自动轮转 .1）。
+
+    attempt>1 或已转人工时另写 <pair_id>_retry.json：首末状态、重拍次数、
+    每次原因/故障类别；final_report 指向该对最终报告文件。
+    """
 
     def __init__(self, output_dir: str, recapture_queue: str):
         self.output_dir = output_dir
@@ -57,6 +64,19 @@ class FileNotifier(Notifier):
         except OSError as e:
             logger.warning("写报告失败 %s: %s", pair_id, e)
             return
+        # 重拍后报告（跨尝试汇总）：只汇总，不复制完整 checks。
+        # 单独兜异常：汇总文件写失败不能挡住后面的重拍队列。
+        retry = report.get("retry") or {}
+        if retry and (attempt > 1 or report.get("escalate_manual")):
+            try:
+                retry_doc = dict(retry)
+                retry_doc["final_report"] = f"{pair_id}.json"
+                retry_doc["written_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+                retry_path = os.path.join(self.output_dir, f"{pair_id}_retry.json")
+                with open(retry_path, "w", encoding="utf-8") as f:
+                    json.dump(retry_doc, f, ensure_ascii=False, indent=2)
+            except OSError as e:
+                logger.warning("写重拍汇总失败 %s: %s", pair_id, e)
         if report.get("recapture_needed"):
             item = {k: report.get(k) for k in
                     ("pair_id", "reasons", "targets", "attempt", "max_attempts",
