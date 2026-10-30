@@ -30,6 +30,12 @@ PATHS = {
 
     # 运行日志目录
     "log_dir": "./logs",
+    # 监听服务：精简反馈目录（每对一份结论 + feedback.jsonl），小车/产线读这里
+    # 缺省放在 output_dir 下（见 service.Settings.from_env），显式配了才用这里的值
+    "feedback_dir": os.environ.get("ROOTBOX_QC_FEEDBACK_DIR") or None,
+    # 监听服务状态（已处理指纹 + 重拍次数；重启后不重复处理、attempt 不丢）
+    # 缺省放在 output_dir 下（见 service.Settings.from_env），显式配了才用这里的值
+    "state_file": os.environ.get("ROOTBOX_QC_STATE_FILE") or None,
     "stitch_output_dir": os.environ.get("ROOTBOX_QC_STITCH_DIR") or None,
 
     # 无缝拼接脚本路径（可选功能；启用 stitch_output_dir 时必须存在且可加载）

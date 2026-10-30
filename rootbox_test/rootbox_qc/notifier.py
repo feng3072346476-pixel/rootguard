@@ -103,22 +103,30 @@ class ConsoleNotifier(Notifier):
 
 
 class HttpNotifier(Notifier):
-    """POST 报告到小车 REST 接口（标准库实现；失败重试 N 次后仅记日志）。"""
+    """POST 报告到小车 REST 接口（标准库实现；失败重试 N 次后仅记日志）。
+
+    幂等：默认带 `Idempotency-Key: <pair_id>:<attempt>`。网络重试是"至少一次"投递，
+    没有幂等键时一次超时重试就会让小车收到两条重拍指令；对端按该键去重即可。
+    """
 
     def __init__(self, url: str, timeout: float = 5.0, retries: int = 2,
-                 notify_on_pass: bool = False):
+                 notify_on_pass: bool = False, idempotency: bool = True):
         self.url = url
         self.timeout = timeout
         self.retries = retries
         self.notify_on_pass = bool(notify_on_pass)
+        self.idempotency = bool(idempotency)
 
     def notify(self, report: dict) -> None:
         if not report.get("recapture_needed") and not self.notify_on_pass:
             return
         body = json.dumps(report, ensure_ascii=False).encode("utf-8")
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        if self.idempotency and report.get("pair_id"):
+            headers["Idempotency-Key"] = (
+                f"{report['pair_id']}:{report.get('attempt') or 1}")
         req = urllib.request.Request(
-            self.url, data=body, method="POST",
-            headers={"Content-Type": "application/json; charset=utf-8"})
+            self.url, data=body, method="POST", headers=headers)
         last_err = None
         for i in range(self.retries + 1):
             try:
@@ -175,6 +183,7 @@ def build_notifier(cfg: dict, paths: dict) -> Notifier:
             h.get("timeout", ncfg.get("timeout", 5.0)),
             h.get("retries", ncfg.get("retries", 2)),
             notify_on_pass=h.get("notify_on_pass", ncfg.get("notify_on_pass", False)),
+            idempotency=h.get("idempotency", ncfg.get("idempotency", True)),
         )
     if ntype == "multi":
         notifiers = []

@@ -70,11 +70,14 @@
 ```
 rootbox_test/
 ├── main.py                # 离线批量入口（ROOTBOX_QC_INPUT_DIR 或 config.paths.input_dir）
+├── run_service.py         # 线上监听服务入口（落图目录 → 质检 → 反馈）
+├── run_service.bat        # 其双击/计划任务启动器（Windows）
 ├── rootbox_qc/            # 代码包
 │   ├── __init__.py        # 对外 API
 │   ├── config.py          # 全部配置：路径 + 阈值 + 配对规则 + 通知方式
 │   ├── runner.py          # 离线：扫描 + 配对 + 检测 + 终端汇总
 │   ├── verify.py          # 线上：verify_single 单图 / verify_pair 单图→成对→拼接→成品复检
+│   ├── service.py         # 线上监听壳：目录轮询 + 启动自检 + 反馈 + 健康/指标 + shadow
 │   ├── checks.py          # 5 类检测实现（+ 可开关的倾斜）
 │   ├── frame.py           # 特征检测：亮金属结构 + LED 光带（自适应阈值）
 │   └── notifier.py        # 通知：file / console / http / multi
@@ -82,6 +85,7 @@ rootbox_test/
 │   ├── smoke_test.py          # 合成图自检（改完代码先跑它）
 │   ├── opt_test.py            # 五类信号/架构专项验证（合成图）
 │   ├── regression_5472.py     # 真实画幅回归：分辨率守卫/竖拍旋转/C 刀口
+│   ├── service_test.py        # 监听服务回归：真图 × 真拼接脚本 × 真 HTTP
 │   ├── export_bad_photos.py   # 按问题类型导出坏图（原图+拼接图）
 │   └── export_bad_photos.bat  # 其双击启动器（Windows，独立部署用）
 └── results/               # 报告 + 重拍队列 + 日志
@@ -564,6 +568,110 @@ rootbox_qc）。目标机需装 Python 3.9+，且 `pip install -r requirements.t
 **输入/输出路径在脚本顶部改**（`INPUT_DIR` / `OUTPUT_DIR` 两个常量），改完双击 .bat 即可；
 命令行 `-i`/`-o` 可临时覆盖，运行开头会打印当前使用的输入/输出目录。
 
+## 用法四：目录监听服务（上线形态，2026-10-30）
+
+`main.py` 是离线批处理；线上要的是"小车把一对图落到目录 → 自动质检 → 把结论反馈回去"。
+`run_service.py` 就是这个壳：轮询落图目录、自动配对、调 `verify_pair`、写反馈（可选 HTTP 回调），
+单对异常不会带崩服务，启动时配置不全直接拒绝启动。
+
+### 落图约定（小车侧）
+
+| 写法 | 例子 | pair_id |
+|---|---|---|
+| 编号子目录 | `<watch>\052\1.png` + `2.png` | `052` |
+| 任意两张 | `<watch>\052\a.png` + `b.png`（目录里正好 2 张） | `052` |
+| 批次 + 编号 | `<watch>\20261030\052\1.png` | `20261030__052` |
+| 平铺 | `<watch>\052_1.png` + `052_2.png` | `052` |
+
+- 目录里正好 2 张图即视为一对；多于 2 张只认 `1/2` 命名，否则跳过并在日志 warning。
+- 支持 `.png/.jpg/.jpeg/.bmp`；忽略隐藏目录、`__pycache__`、`done/`、`output/`、`feedback/`、`logs/`。
+- 监听目录**不能等于**输出目录（否则会把自己的输出当落图，启动自检会拦）。
+- 文件正在写时按 PNG/JPEG 文件头判断"未就绪"，等写完再处理，不会读到半张图。
+
+### 启动
+
+```bat
+set ROOTBOX_QC_STITCH_DIR=D:\yy1\qc\stitch
+python run_service.py --watch D:\yy1\qc_in --out D:\yy1\qc_out --health-port 8090
+rem 或：run_service.bat --watch D:\yy1\qc_in --out D:\yy1\qc_out --health-port 8090
+```
+
+- **fail-closed 自检**（不过就退出码 3，不会带半套配置上线）：监听/输出/反馈/日志目录可写且不重叠；
+  `require_stitch` 时 `stitch_output_dir` 必须配、`stitch_script` 必须存在且能加载出 `stitch_from_qc`；
+  画幅 5472×3648；`layout` 合法；`blur_strip_cuts` 三个升序整数；cv2 真跑一次；回调地址合法。
+- `--no-require-stitch`：调试用，跳过拼接复检（反馈 `degraded: ["stitch-disabled"]`），生产别用。
+- `--shadow`：旁路只记录不拦车；`--once` 扫一轮退出；`--dry-run` 只列候选；`--print-config` 打印生效配置。
+
+### 反馈（小车侧读什么）
+
+| 文件 | 用途 |
+|---|---|
+| `<out>\feedback\<pair_id>.json` | 单对结论，**小车只读这一个**；原子写（tmp+fsync+replace），不会读到半个 JSON |
+| `<out>\feedback\feedback.jsonl` | 追加流水，夜间批量汇总用 |
+| `<out>\<pair_id>.json` | 完整报告（每张图逐项 checks），排障用 |
+| `<out>\recapture_queue.jsonl` | 重拍队列（shadow 时写 `shadow_queue.jsonl`） |
+
+单对结论示例：
+
+```json
+{
+  "pair_id": "1491",
+  "status": "fail",
+  "passed": false,
+  "recapture_needed": true,
+  "targets": ["D:\\yy1\\qc_in\\1491\\1.png", "D:\\yy1\\qc_in\\1491\\2.png"],
+  "reasons": ["[1.png] 底部金属长边结构缺失/不明显（底部挺直度 0.220 < 0.35 且目标底梁带 0.220 < 0.28），疑似未拍全根盒下侧"],
+  "attempt": 1,
+  "max_attempts": 3,
+  "escalate_manual": false,
+  "systemic_alert": null,
+  "failure_categories": ["不全"],
+  "stitched_status": null,
+  "resolution_mismatch": false,
+  "elapsed_ms": 1512.0,
+  "processed_at": "2026-10-30T13:30:12",
+  "report_file": "1491.json",
+  "degraded": []
+}
+```
+
+- `recapture_needed=true` 才拦车；`targets` 是重拍哪几张（绝对路径）。
+- `status=undetermined`（分辨率不对/读图失败/成品缺失）默认也 `recapture_needed=true`，别当通过。
+- `escalate_manual=true`：已达 `max_attempts`（默认 3）仍不合格 → 转人工，不要再让小车重拍。
+- `resolution_mismatch=true`：输入被裁剪/缩放，先查落图链路（压缩/转码），别改阈值。
+- `attempt` 按 pair_id + 文件指纹递增：重拍落回同一个 pair_id 目录即可。
+- shadow 模式下 `recapture_needed` 恒为 `false`，真实判断放在 `would_recapture` / `would_reasons` / `would_targets`。
+
+### 重拍、幂等与异常
+
+- 状态文件 `<out>\service_state.json`：记录每对（文件名+大小+mtime）。文件没变 → 不重复质检；
+  重拍改了文件 → `attempt+1`；服务重启从状态恢复，不重跑、不丢次数。
+- 单对异常（坏文件、拼接器崩）最多重试 3 次，超过写一条 `status=error` + `escalate_manual=true`
+  的反馈，然后继续处理后面的对。
+- HTTP 回调（`--callback http://<小车>:8080/qc`）带 `Idempotency-Key: <pair_id>:<attempt>`；
+  网络重试是"至少一次"投递，对端按这个键去重。合格对默认不回调（`notify_on_pass` 可开）。
+
+### 运维面
+
+- `/health`：200 + JSON（uptime、pairs_total、pending、p50/p95、last）；心跳超时返回 503 `status: stale`。
+- `/metrics`：Prometheus 文本（`rootbox_qc_pairs_total` 等）。
+- 单实例锁 `<out>\.watch_service.lock`：同一输出目录只允许一个进程；崩溃残留锁按 pid 存活自动接管。
+- 日志 `<log-dir>\watch_service.log`，5MB × 5 轮转。
+- 建议 `schtasks /sc onstart` 或 NSSM 包装，重启策略 always。
+
+### 上线顺序（别跳）
+
+1. `--shadow` 跑 1~2 周：只记录不拦车，每天抽 20~30 对人工核对 `would_recapture`，统计"若真拦会误停几次"。
+2. 冻结阈值，真实样本池盲测（先跑后对答案），达到验收线再切 live：
+   正常误报≤1%、损坏/不全漏检≤5%、`undetermined`<1%、p95≤3s/对。
+3. 切 `live` 第一周保留人工放行通道（删 `service_state.json` 里该对或重跑即可）。
+
+实测（本机，含拼接复检）：合格对 5.4~5.6s，不合格对 1.4~1.5s，串行。多工位并发需多进程/多输出目录。
+
+```bash
+python scripts/service_test.py    # 真图 × 真拼接脚本 × 真 HTTP，期望 31 项全 PASS
+```
+
 ## 自检
 
 ```bash
@@ -593,6 +701,10 @@ python scripts/regression_5472.py  # 5472 横/竖图 + 真实锚点：期望 11/
 | 拼接图判 `fail/undetermined` | 看报告 `stitched_checks` / `stitch_error`；成品问题会阻塞整对并指向两张原图，先排查拼接器输出、分辨率与 C 刀口 |
 | 拼接后每对都变慢/占磁盘 | 每个通过的对都会写 `<pair_id>.png` 并多跑一遍检查；离线只审片传 `stitch_output_dir=""` 关闭 |
 | 好图全被标倾斜 | 上调 `tilt_angle_max_deg`（旧值 8.714 经 D:\yy1 调优） |
+| 监听服务启动报"未配置拼接输出目录" | 设 `ROOTBOX_QC_STITCH_DIR` 指向拼接输出目录（生产必须）；仅调试可加 `--no-require-stitch` |
+| 落图后反馈目录一直没新文件 | 看日志和 `/health`：`pending` 是否为 0（图片数不对/命名不匹配/目录被 skip），或文件还在写（文件头未就绪会等）；确认监听目录没配成输出目录 |
+| 同一对反复重拍仍是 fail | 正常：`attempt` 到 `max_attempts`（默认 3）会 `escalate_manual=true` 转人工；看 `failure_categories` 和完整报告定位 |
+| 想手工重跑某一对 | 删 `service_state.json` 里该 pair 的记录（或用新 pair_id 落一次）；文件指纹没变不会重复质检 |
 | 大图跑得慢 | 本机实测 5472×3648 单张约 0.8~1.5s、成对约 1.8~3.2s（不含拼接）；线上可用 `align_orb_downscale` 调大提速 |
 
 ## 日志
