@@ -103,9 +103,9 @@ pip install -r requirements.txt
 # 设置 ROOTBOX_QC_INPUT_DIR，或改 config.py 的 paths.input_dir；或：
 from rootbox_qc import run
 
-reports = run(r"D:\yy1")                              # 终端打印 + results/ 报告 + 重拍队列
-reports = run(r"D:\yy1", thresholds={"tilt_angle_max_deg": 5.0})   # 临时覆盖阈值
-reports = run(r"D:\yy1", write_files=False)           # 只看终端
+reports = run(r"D:\qc\in")                              # 终端打印 + results/ 报告 + 重拍队列
+reports = run(r"D:\qc\in", thresholds={"tilt_angle_max_deg": 5.0})   # 临时覆盖阈值
+reports = run(r"D:\qc\in", write_files=False)           # 只看终端
 ```
 
 支持目录结构（自动识别）：平铺 `n_1.jpg+n_2.jpg` / 单层 `001\1.png+2.png` /
@@ -224,7 +224,7 @@ NOTIFIER = {"type": "multi", "targets": [
 | 重复拍摄 | 文件字节完全相同（零误报强信号）/ **低频照明差**（主信号，"两次拍摄照明状态相同"的定义式，缩 200px 宽＋高斯模糊后作差，对箱体微移的边缘错位免疫）/ 特征内点率＋位移；任一命中即判 | 低频照明差 `≤10`（全池标定：同光照 ≤4.5、不同光照 ≥19.1）；内点率 `≥95%` 且位移 `≤5px`；独立类别，2026-09-09 从错位拆出，2026-09-24 主信号由原始 MAE 换为低频照明差 |
 
 > 阈值说明：0.0571→0.30 与角点检查开关为 2026-09-07 现场重标定（`F:\2026_maize_root_ertao`，
-> 白天反光亮区）；`D:\yy1` 夜间环境的旧值见 config.py 注释。换现场务必重新标定。
+> 白天反光亮区）；夜间环境的旧值见 config.py 注释。换现场务必重新标定。
 > 2026-09-08 bigbox 线基于已导出命中样本重算 + 视觉抽检，更新了模糊列宽（LED 固有宽度
 > 23~60px→阈值 75；ROI 方差 30→15，正常暗画幅 16~30）、不全区段（夜拍金属不发亮、
 > 凸包无区分度→禁用）、倾斜整类（34 命中行角度 9~43° 全部为亮斑/反光散布假象，
@@ -514,7 +514,7 @@ dataed 目录未改）。`check_completeness` 为正常 145/145 pass、不全 10
    其他尺寸判 `undetermined`。换相机/换分辨率必须同时改
    `expected_width/expected_height` 并重新标定刀口。
 1. **阈值默认值基于 2026-09-07 F:\2026_maize_root_ertao 现场重标定**
-   （全天 1170 组分布 + 问题样本逐张核对），原 D:\yy1 夜间调优值见 config.py 注释；
+   （全天 1170 组分布 + 问题样本逐张核对），原夜间现场调优值见 config.py 注释；
    换产线/换拍摄环境必须重新标定。
    `blur_led_max_width / completeness_hull / alignment_shift / alignment_inlier`
    四项已于 2026-09-08 按 bigbox 线（`D:\pic\data` 已有命中样本 + 抽检）调整，
@@ -603,11 +603,11 @@ rootbox_qc）。目标机需装 Python 3.9+，且 `pip install -r requirements.t
 
 ```bat
 rem 现场路径先用命令行传，等确认后固化成 .bat 默认值
-python run_service.py --watch D:\yy1\in --out D:\yy1\qc_out ^
-    --stitch-dir D:\yy1\save --stitch-script "d:\tupianpj\图片拼接2.py" ^
+python run_service.py --watch D:\qc\in --out D:\qc\out ^
+    --stitch-dir D:\qc\save --stitch-script "d:\tupianpj\图片拼接2.py" ^
     --health-port 8090 --shadow
 
-rem 或：run_service.bat --watch D:\yy1\in --out D:\yy1\qc_out --stitch-dir D:\yy1\save --shadow
+rem 或：run_service.bat --watch D:\qc\in --out D:\qc\out --stitch-dir D:\qc\save --shadow
 rem 确认无误后去掉 --shadow 即正式拦截
 ```
 
@@ -639,7 +639,7 @@ rem 确认无误后去掉 --shadow 即正式拦截
   "status": "fail",
   "passed": false,
   "recapture_needed": true,
-  "targets": ["D:\\yy1\\in\\data1030\\0002\\1.png", "D:\\yy1\\in\\data1030\\0002\\2.png"],
+  "targets": ["D:\\qc\\in\\data1030\\0002\\1.png", "D:\\qc\\in\\data1030\\0002\\2.png"],
   "reasons": ["[1.png] 底部金属长边结构缺失/不明显（底部挺直度 0.220 < 0.35 且目标底梁带 0.220 < 0.28），疑似未拍全根盒下侧"],
   "attempt": 1,
   "max_attempts": 3,
@@ -700,8 +700,8 @@ python scripts/service_test.py    # 真图 × 真拼接脚本 × 真 HTTP，期�
 
 | 待定项 | 现状 | 确认后怎么改 |
 |---|---|---|
-| 落图根目录 `--watch` | 用示例路径 `D:\yy1\in` | 换成小车实际落图目录 |
-| 成品根目录 `--stitch-dir` | 用示例路径 `D:\yy1\save` | 换成现场 `save` 的绝对路径 |
+| 落图根目录 `--watch` | 用示例路径 `D:\qc\in` | 换成小车实际落图目录 |
+| 成品根目录 `--stitch-dir` | 用示例路径 `D:\qc\save` | 换成现场 `save` 的绝对路径 |
 | 小车怎么拿反馈 | 读 `feedback\<批次>\<编号>.json`（已镜像） | 若走 HTTP，加 `--callback http://<小车>:<端口>/...` |
 | 开机自启 | 未固化 | 改 `run_service.bat` 顶部默认值，或 `schtasks /sc onstart` |
 | 是否已切正式拦截 | 建议先 `--shadow` | 观察 1~2 周无误停后去掉 `--shadow` |
@@ -734,7 +734,7 @@ python scripts/regression_5472.py  # 5472 横/竖图 + 真实锚点：期望 11/
 | `stitched_status` 是 `None` | 没配 `stitch_output_dir`，只做了单图+成对检查；生产设 `ROOTBOX_QC_STITCH_DIR`，离线人工审片可忽略 |
 | 拼接图判 `fail/undetermined` | 看报告 `stitched_checks` / `stitch_error`；成品问题会阻塞整对并指向两张原图，先排查拼接器输出、分辨率与 C 刀口 |
 | 拼接后每对都变慢/占磁盘 | 每个通过的对都会写 `<pair_id>.png` 并多跑一遍检查；离线只审片传 `stitch_output_dir=""` 关闭 |
-| 好图全被标倾斜 | 上调 `tilt_angle_max_deg`（旧值 8.714 经 D:\yy1 调优） |
+| 好图全被标倾斜 | 上调 `tilt_angle_max_deg`（旧值 8.714 经旧夜间现场调优） |
 | 监听服务启动报"未配置拼接输出目录" | 设 `ROOTBOX_QC_STITCH_DIR` 指向拼接输出目录（生产必须）；仅调试可加 `--no-require-stitch` |
 | 落图后反馈目录一直没新文件 | 看日志和 `/health`：`pending` 是否为 0（图片数不对/命名不匹配/目录被 skip），或文件还在写（文件头未就绪会等）；确认监听目录没配成输出目录 |
 | 同一对反复重拍仍是 fail | 正常：`attempt` 到 `max_attempts`（默认 3）会 `escalate_manual=true` 转人工；看 `failure_categories` 和完整报告定位 |

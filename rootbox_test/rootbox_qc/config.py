@@ -20,7 +20,7 @@ PATHS = {
     #   2) 单层：<dir>/<编号>/1.png + <编号>/2.png
     #   3) 双层：<dir>/<类别>/<编号>/1.png + <编号>/2.png
     #   4) 根目录无图：自动汇总所有含图的子目录
-    "input_dir": r"D:\yy1",          # ← 部署时改成实际目录（也可用环境变量 ROOTBOX_QC_INPUT_DIR）
+    "input_dir": r"D:\qc\in",          # ← 部署时改成实际目录（也可用环境变量 ROOTBOX_QC_INPUT_DIR）
 
     # 报告输出目录（每对一张 JSON）
     "output_dir": "./results",

@@ -5,8 +5,8 @@
 
 启动（先 shadow 旁路观察，确认无误再切 live）：
 
-    set ROOTBOX_QC_STITCH_DIR=D:\\yy1\\qc\\stitch
-    python run_service.py --watch D:\\yy1\\qc_in --out D:\\yy1\\qc_out --health-port 8090 --shadow
+    set ROOTBOX_QC_STITCH_DIR=D:\\qc\\save
+    python run_service.py --watch D:\\qc\\in --out D:\\qc\\out --health-port 8090 --shadow
 
 切 live 去掉 --shadow。详细约定见 README「用法四：目录监听服务」。
 """
