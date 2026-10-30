@@ -1,14 +1,13 @@
 @echo off
-rem 导出坏图启动器：双击直接运行（使用 export_bad_photos.py 顶部默认的输入/输出目录），
-rem 也可带参覆盖，如：export_bad_photos.bat -i D:\data -o D:\qc_bad --dry-run
+rem 导出坏图启动器：双击直接运行，也可带参覆盖：
+rem   export_bad_photos.bat -i <样本根目录> -o <坏图输出目录> --dry-run
 rem 本文件与 export_bad_photos.py、rootbox_qc\ 放在同一目录即可独立使用。
 chcp 65001 >nul
 cd /d "%~dp0"
 
-rem 按机器实际环境改这行；也可留 python（前提是已在 PATH 上）
-set "PY=D:\Anaconda3\envs\root-cleaner\python.exe"
-if not exist "%PY%" set "PY=python"
+rem Python 解释器：优先环境变量 ROOTBOX_QC_PYTHON，其次 PATH 里的 python
+if not defined ROOTBOX_QC_PYTHON set "ROOTBOX_QC_PYTHON=python"
 
-"%PY%" export_bad_photos.py %*
+"%ROOTBOX_QC_PYTHON%" export_bad_photos.py %*
 echo.
 pause

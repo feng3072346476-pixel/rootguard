@@ -110,14 +110,16 @@ def check_real(data_root: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default=os.environ.get("ROOTBOX_QC_DATA", r"D:\data\dataed"))
+    ap.add_argument("--data", default=os.environ.get("ROOTBOX_QC_DATA", ""),
+                    help="真样本根目录（也可设 ROOTBOX_QC_DATA）；不给则只跑合成图部分")
     args = ap.parse_args()
     try:
         check_synthetic()
         if args.data and os.path.isdir(args.data):
             check_real(args.data)
         else:
-            print(f"== 3. 跳过真实锚点：{args.data!r} 不存在 ==")
+            print("== 3. 跳过真实锚点：未指定 --data / ROOTBOX_QC_DATA，"
+                  "或该目录不存在 ==")
         failed = [r for r in RESULTS if not r[1]]
         print()
         if not failed:

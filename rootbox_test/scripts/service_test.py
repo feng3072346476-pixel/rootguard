@@ -38,7 +38,8 @@ from rootbox_qc.service import (  # noqa: E402
     Settings, StartupError, WatchService, discover, setup_service_logging,
 )
 
-DATAED = os.environ.get("ROOTBOX_QC_DATA", r"D:\data\dataed")
+DATAED = os.environ.get("ROOTBOX_QC_DATA", "")
+STITCH_SCRIPT = os.environ.get("ROOTBOX_QC_STITCH_SCRIPT", "")
 WORK = os.path.join(PKG_ROOT, "_tmp", "service_test")
 PASS_PAIR = ("正常", "067")
 FAIL_PAIR = ("不全", "1491")
@@ -348,7 +349,10 @@ def main() -> int:
     global DATAED
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", action="store_true", help="保留测试目录")
-    ap.add_argument("--data", default=DATAED, help=f"真样本根目录（默认 {DATAED}）")
+    ap.add_argument("--data", default=DATAED,
+                    help="真样本根目录；也可设环境变量 ROOTBOX_QC_DATA")
+    ap.add_argument("--stitch-script", default=STITCH_SCRIPT,
+                    help="拼接脚本路径；也可设环境变量 ROOTBOX_QC_STITCH_SCRIPT")
     args = ap.parse_args()
 
     DATAED = args.data
@@ -357,6 +361,14 @@ def main() -> int:
     stitch_dir = (cfg.get("paths") or {}).get("stitch_output_dir")
     if not stitch_dir:
         print("需要配置 ROOTBOX_QC_STITCH_DIR（生产同款拼接目录）后运行本测试")
+        return 2
+    if not args.stitch_script or not os.path.isfile(args.stitch_script):
+        print("需要拼接脚本：--stitch-script <路径> 或环境变量 ROOTBOX_QC_STITCH_SCRIPT")
+        return 2
+    cfg.setdefault("paths", {})["stitch_script"] = args.stitch_script
+    if not DATAED:
+        print("需要真样本根目录：--data <路径> 或环境变量 ROOTBOX_QC_DATA\n"
+              "  目录结构应为 <根>/正常/067/1.png + 2.png、<根>/不全/1491/1.png + 2.png")
         return 2
     if not os.path.isdir(os.path.join(DATAED, *PASS_PAIR)):
         print(f"缺测试样本 {os.path.join(DATAED, *PASS_PAIR)}")

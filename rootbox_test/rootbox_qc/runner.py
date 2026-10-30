@@ -101,7 +101,7 @@ def collect_pairs(input_dir: str, pairing_regex: str) -> list[tuple]:
     支持：
       A. 平铺：<prefix>_<idx>.<ext>（如 root_001_1.jpg + root_001_2.jpg）
       B. 单层子目录：每个子目录里 1.<ext> + 2.<ext>（支持 png/jpg/jpeg/bmp）
-      C. 双层子目录：<类别>/<编号>/1.<ext> + 2.<ext>（如 D:\\data\\不全\\004）
+      C. 双层子目录：<类别>/<编号>/1.<ext> + 2.<ext>（如 <样本根>\\不全\\004）
       D. 根目录无图但子目录有图：自动汇总所有含图的子目录
 
     Returns: list of (pair_id, path_a, path_b)，path_b 可能为 None（单图）
@@ -379,6 +379,11 @@ def run(
         cfg["thresholds"].update(thresholds)
     if input_kind is not None:
         cfg["thresholds"]["input_kind"] = input_kind
+
+    if not paths.get("input_dir"):
+        raise ValueError(
+            "未指定待质检目录：传 run(input_dir=...) 或设环境变量 "
+            "ROOTBOX_QC_INPUT_DIR（config.py 不再内置任何机器相关路径）")
 
     # 启用拼接时启动即校验脚本，避免跑完整批才在每对上报错
     stitch_dir = paths.get("stitch_output_dir")

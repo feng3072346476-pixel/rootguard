@@ -1,18 +1,18 @@
 """按问题类型批量导出坏图，整夹剪切到指定目录（多类命中先复制后剪切）。
 
 场景：从拍照落盘目录中筛出各分类问题图（损坏/模糊/倾斜/不全/错位/重复拍摄），
-命中问题的那组（如 F:\\...\\Date0525_left\\001\\ 里的 1.png + 2.png）
+命中问题的那组（如 <某批次>\\001\\ 里的 1.png + 2.png）
 以整个编号目录为单位剪切（移动）到分类目录，文件名不动，源目录不再保留。
 
 用法
 ====
-    python scripts/export_bad_photos.py -i D:\\data -o D:\\qc_bad
-    python scripts/export_bad_photos.py -i D:\\data -o D:\\qc_bad --thresholds "{\\"tilt_angle_max_deg\\": 5.0}"
-    python scripts/export_bad_photos.py -i D:\\data -o D:\\qc_bad --dry-run    # 只列计划，不剪切
+    python scripts/export_bad_photos.py -i <样本根目录> -o <坏图输出目录>
+    python scripts/export_bad_photos.py -i <样本根目录> -o <坏图输出目录> --thresholds "{\\"tilt_angle_max_deg\\": 5.0}"
+    python scripts/export_bad_photos.py -i <样本根目录> -o <坏图输出目录> --dry-run    # 只列计划，不剪切
 
 注意：命中的来源目录/文件会从输入目录移走；不确定时先 --dry-run 看计划。
 
-也可以不动命令行：直接改本文件顶部的 INPUT_DIR / OUTPUT_DIR 两个常量，
+也可以不动命令行：设环境变量 ROOTBOX_QC_EXPORT_SRC / ROOTBOX_QC_EXPORT_DST，
 保存后双击同目录的 export_bad_photos.bat 即可。
 
 独立部署：把本脚本与 rootbox_qc/ 包一起拷到任意目录直接运行
@@ -21,7 +21,7 @@ export_bad_photos.bat 双击运行或带参调用。
 
 输出结构
 ========
-    D:\\qc_bad\\
+    <坏图输出目录>\\
     ├── 损坏\\001\\1.png, 2.png      ← 整体剪切来源编号目录（文件原样，源目录移走）
     ├── 模糊\\...
     ├── 倾斜\\...
@@ -81,13 +81,15 @@ except (AttributeError, ValueError):
     pass
 
 # ============================================================================
-# 编辑这里：默认输入 / 输出路径（改完保存即可，双击 .bat 直接运行；
-# 命令行 -i / -o 传入时覆盖这两个默认值）
-# 注意：切勿将 OUTPUT_DIR 设为真值标注目录 D:\pic\data，避免误污染基准集！
+# 输入 / 输出目录：默认从环境变量读，没有就必须用 -i / -o 传（不内置任何机器路径）
+#   ROOTBOX_QC_EXPORT_SRC  拍照落盘目录
+#   ROOTBOX_QC_EXPORT_DST  坏图导出目录
+#   ROOTBOX_QC_PROTECTED_DIR  可选：受保护的真值基准库，禁止写入
 # ============================================================================
-INPUT_DIR = r"D:\pic\data\total"          # 拍照落盘目录
-OUTPUT_DIR = r"D:\pic\qc_bad_export"      # 导出目录（独立于 D:\pic\data 真值库）
-_PROTECTED_DATA_DIR = os.path.normcase(os.path.normpath(r"D:\pic\data"))
+INPUT_DIR = os.environ.get("ROOTBOX_QC_EXPORT_SRC") or ""
+OUTPUT_DIR = os.environ.get("ROOTBOX_QC_EXPORT_DST") or ""
+_PROTECTED_DATA_DIR = (os.path.normcase(os.path.normpath(os.environ["ROOTBOX_QC_PROTECTED_DIR"]))
+                       if os.environ.get("ROOTBOX_QC_PROTECTED_DIR") else "")
 
 # 主分类优先级（首个命中即主类）
 # 2026-10-19：补上 illum_pair（单灯管照明，归损坏）与 blur_pair（成对模糊，归模糊）——
@@ -175,9 +177,9 @@ def main() -> int:
     _claimed.clear()
     ap = argparse.ArgumentParser(description="按问题类型导出坏图")
     ap.add_argument("-i", "--input", default=INPUT_DIR,
-                    help=f"拍照落盘目录（默认 {INPUT_DIR}）")
+                    help="拍照落盘目录（也可设 ROOTBOX_QC_EXPORT_SRC）")
     ap.add_argument("-o", "--output", default=OUTPUT_DIR,
-                    help=f"导出目录（默认 {OUTPUT_DIR}）")
+                    help="导出目录（也可设 ROOTBOX_QC_EXPORT_DST）")
     ap.add_argument("--thresholds", default="{}",
                     help='JSON 阈值覆盖，如 {"blur_led_max_width": 60}')
     ap.add_argument("--multi-copy", action="store_true",
@@ -185,16 +187,23 @@ def main() -> int:
     ap.add_argument("--copy", action="store_true",
                     help="只复制不剪切（保留源目录/源文件不动）")
     ap.add_argument("--allow-data-dir", action="store_true",
-                    help="显式允许向受保护的 D:\\pic\\data 写入（默认禁止以防污染基准库）")
+                    help="显式允许向受保护的真值库写入（ROOTBOX_QC_PROTECTED_DIR 指定）")
     ap.add_argument("--dry-run", action="store_true",
                     help="只列出计划，不执行复制/剪切")
     args = ap.parse_args()
 
+    if not args.input:
+        print("  错误：未指定输入目录，请用 -i <目录> 或设环境变量 ROOTBOX_QC_EXPORT_SRC")
+        return 2
+    if not args.output:
+        print("  错误：未指定输出目录，请用 -o <目录> 或设环境变量 ROOTBOX_QC_EXPORT_DST")
+        return 2
+
     out_norm = os.path.normcase(os.path.normpath(os.path.abspath(args.output)))
     in_norm = os.path.normcase(os.path.normpath(os.path.abspath(args.input)))
-    if not args.dry_run and not args.allow_data_dir:
+    if _PROTECTED_DATA_DIR and not args.dry_run and not args.allow_data_dir:
         if out_norm == _PROTECTED_DATA_DIR or in_norm.startswith(_PROTECTED_DATA_DIR + os.sep):
-            print("  错误：检测到输入或输出涉及真值基准库 D:\\pic\\data。")
+            print("  错误：检测到输入或输出涉及受保护的真值基准库。")
             print("        为防止误剪切/污染标定基准集，请改用独立目录，或显式加 --dry-run / --allow-data-dir。")
             return 2
 

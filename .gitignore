@@ -13,6 +13,10 @@ data/
 dataed/
 logs/
 results/
+_tmp/
+
+# 现场配置（由 service_env.example.bat 复制而来，含本机路径，不要提交）
+service_env.bat
 
 # 备份与压缩包
 _backup_*/

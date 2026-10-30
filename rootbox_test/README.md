@@ -103,9 +103,9 @@ pip install -r requirements.txt
 # 设置 ROOTBOX_QC_INPUT_DIR，或改 config.py 的 paths.input_dir；或：
 from rootbox_qc import run
 
-reports = run(r"D:\qc\in")                              # 终端打印 + results/ 报告 + 重拍队列
-reports = run(r"D:\qc\in", thresholds={"tilt_angle_max_deg": 5.0})   # 临时覆盖阈值
-reports = run(r"D:\qc\in", write_files=False)           # 只看终端
+reports = run(r"<落图目录>")                              # 终端打印 + results/ 报告 + 重拍队列
+reports = run(r"<落图目录>", thresholds={"tilt_angle_max_deg": 5.0})   # 临时覆盖阈值
+reports = run(r"<落图目录>", write_files=False)           # 只看终端
 ```
 
 支持目录结构（自动识别）：平铺 `n_1.jpg+n_2.jpg` / 单层 `001\1.png+2.png` /
@@ -121,24 +121,24 @@ reports = run(r"D:\qc\in", write_files=False)           # 只看终端
 
 ```python
 import os
-os.environ["ROOTBOX_QC_STITCH_DIR"] = r"D:\data\qc_stitched"       # 生产必须
-os.environ["ROOTBOX_QC_STITCH_SCRIPT"] = r"d:\tupianpj\图片拼接2.py"
+os.environ["ROOTBOX_QC_STITCH_DIR"] = r"<成品根目录>"                 # 生产必须，如需按批次分
+os.environ["ROOTBOX_QC_STITCH_SCRIPT"] = r"<拼接脚本路径>"            # 需提供 stitch_from_qc
 
 from rootbox_qc import verify_single, verify_pair
 from rootbox_qc.config import load_config
 
 cfg = load_config()          # 或用 run 时同一套配置
-rep_a = verify_single(r"D:\data\001\1.png", cfg, attempt=1, input_kind="raw")
+rep_a = verify_single(r"<落图目录>\001\1.png", cfg, attempt=1, input_kind="raw")
 if rep_a.recapture_needed:   # fail 和 undetermined 都为 True
     notify_robot_to_retake(rep_a.recapture_targets, rep_a.recapture_reasons)
     # 重拍后 attempt+1 再检；达到 max_attempts(3) 转人工
     # rep_a.status == "undetermined" 时，告警文案应说明"判不了/需人工确认"，不要当作确定缺陷
 else:
-    rep_b = verify_single(r"D:\data\001\2.png", cfg, attempt=1, input_kind="raw")
+    rep_b = verify_single(r"<落图目录>\001\2.png", cfg, attempt=1, input_kind="raw")
     if rep_b.recapture_needed:
         notify_robot_to_retake(rep_b.recapture_targets, rep_b.recapture_reasons)
     else:
-        rep = verify_pair(r"D:\data\001\1.png", r"D:\data\001\2.png", cfg,
+        rep = verify_pair(r"<落图目录>\001\1.png", r"<落图目录>\001\2.png", cfg,
                           attempt=1, input_kind="raw", res_a=rep_a, res_b=rep_b)
         if rep.recapture_needed:
             notify_robot_to_retake(rep.recapture_targets, rep.recapture_reasons)
@@ -267,8 +267,8 @@ NOTIFIER = {"type": "multi", "targets": [
 
 ```python
 cfg = load_config()
-cfg["paths"]["stitch_script"] = r"d:\tupianpj\图片拼接2.py"   # 需提供 stitch_from_qc
-cfg["paths"]["stitch_output_dir"] = r"D:\data\qc_stitched"
+cfg["paths"]["stitch_script"] = r"<拼接脚本路径>"        # 需提供 stitch_from_qc
+cfg["paths"]["stitch_output_dir"] = r"<成品根目录>"
 ```
 
 也可在 import 前设 `ROOTBOX_QC_STITCH_DIR` / `ROOTBOX_QC_STITCH_SCRIPT`。
@@ -539,10 +539,10 @@ dataed 目录未改）。`check_completeness` 为正常 145/145 pass、不全 10
 不确定时先 `--dry-run` 看计划：
 
 ```bash
-python scripts/export_bad_photos.py -i F:\...\Data0525 -o D:\qc_bad            # 剪切 + 明细.csv
-python scripts/export_bad_photos.py -i F:\...\Data0525 -o D:\qc_bad --dry-run  # 只列计划，不动文件
-python scripts/export_bad_photos.py -i F:\...\Data0525 -o D:\qc_bad --multi-copy  # 多类命中每类一份
-python scripts/export_bad_photos.py -i F:\...\Data0525 -o D:\qc_bad --thresholds '{"tilt_angle_max_deg": 5.0}'
+python scripts/export_bad_photos.py -i <落图目录>\<批次> -o <坏图输出目录>            # 剪切 + 明细.csv
+python scripts/export_bad_photos.py -i <落图目录>\<批次> -o <坏图输出目录> --dry-run  # 只列计划，不动文件
+python scripts/export_bad_photos.py -i <落图目录>\<批次> -o <坏图输出目录> --multi-copy  # 多类命中每类一份
+python scripts/export_bad_photos.py -i <落图目录>\<批次> -o <坏图输出目录> --thresholds '{"tilt_angle_max_deg": 5.0}'
 ```
 
 输出：`损坏|模糊|倾斜|不全|错位|重复拍摄\<编号目录>\`（目录内 1.png/2.png 原样）+ `明细.csv`
@@ -602,17 +602,18 @@ rootbox_qc）。目标机需装 Python 3.9+，且 `pip install -r requirements.t
 ### 启动
 
 ```bat
-rem 现场路径先用命令行传，等确认后固化成 .bat 默认值
-python run_service.py --watch D:\qc\in --out D:\qc\out ^
-    --stitch-dir D:\qc\save --stitch-script "d:\tupianpj\图片拼接2.py" ^
+rem 代码里没有写死任何机器路径，下面三项都从命令行/环境变量给
+python run_service.py --watch <落图目录> --out <输出目录> ^
+    --stitch-dir <成品根目录> --stitch-script <拼接脚本路径> ^
     --health-port 8090 --shadow
 
-rem 或：run_service.bat --watch D:\qc\in --out D:\qc\out --stitch-dir D:\qc\save --shadow
+rem 或（推荐）：把路径写进 service_env.bat（从 service_env.example.bat 复制改），然后
+run_service.bat --shadow
 rem 确认无误后去掉 --shadow 即正式拦截
 ```
 
 - `--stitch-dir` 给**成品的父目录**（现场的 `save`），服务会自动按批次建子目录 `save\<批次>\`。
-- `--stitch-script` 指向提供 `stitch_from_qc` 的拼接脚本（现用 `d:\tupianpj\图片拼接2.py`）。
+- `--stitch-script` 指向现场提供 `stitch_from_qc` 的拼接脚本（路径由目标机给，仓库不带这份脚本）。
 
 - **fail-closed 自检**（不过就退出码 3，不会带半套配置上线）：监听/输出/反馈/日志目录可写且不重叠；
   `require_stitch` 时 `stitch_output_dir` 必须配、`stitch_script` 必须存在且能加载出 `stitch_from_qc`；
@@ -639,7 +640,7 @@ rem 确认无误后去掉 --shadow 即正式拦截
   "status": "fail",
   "passed": false,
   "recapture_needed": true,
-  "targets": ["D:\\qc\\in\\data1030\\0002\\1.png", "D:\\qc\\in\\data1030\\0002\\2.png"],
+  "targets": ["<落图目录>\\data1030\\0002\\1.png", "<落图目录>\\data1030\\0002\\2.png"],
   "reasons": ["[1.png] 底部金属长边结构缺失/不明显（底部挺直度 0.220 < 0.35 且目标底梁带 0.220 < 0.28），疑似未拍全根盒下侧"],
   "attempt": 1,
   "max_attempts": 3,
@@ -691,7 +692,9 @@ rem 确认无误后去掉 --shadow 即正式拦截
 实测（本机，含拼接复检）：合格对 5.4~5.6s，不合格对 1.4~1.5s，串行。多工位并发需多进程/多输出目录。
 
 ```bash
-python scripts/service_test.py    # 真图 × 真拼接脚本 × 真 HTTP，期望 39 项全 PASS
+python scripts/service_test.py --data <样本根目录> --stitch-script "<拼接脚本路径>"
+    # 真图 × 真拼接脚本 × 真 HTTP，期望 39 项全 PASS；也可用 ROOTBOX_QC_DATA /
+    # ROOTBOX_QC_STITCH_SCRIPT 环境变量给，另需 ROOTBOX_QC_STITCH_DIR
 ```
 
 ### 现场待定（后续再改）
@@ -700,8 +703,8 @@ python scripts/service_test.py    # 真图 × 真拼接脚本 × 真 HTTP，期�
 
 | 待定项 | 现状 | 确认后怎么改 |
 |---|---|---|
-| 落图根目录 `--watch` | 用示例路径 `D:\qc\in` | 换成小车实际落图目录 |
-| 成品根目录 `--stitch-dir` | 用示例路径 `D:\qc\save` | 换成现场 `save` 的绝对路径 |
+| 落图根目录 `--watch` | **未内置**，必须现场给 | 用 `--watch` 或 `ROOTBOX_QC_WATCH_DIR` |
+| 成品根目录 `--stitch-dir` | **未内置**，必须现场给 | 用 `--stitch-dir` 或 `ROOTBOX_QC_STITCH_DIR` |
 | 小车怎么拿反馈 | 读 `feedback\<批次>\<编号>.json`（已镜像） | 若走 HTTP，加 `--callback http://<小车>:<端口>/...` |
 | 开机自启 | 未固化 | 改 `run_service.bat` 顶部默认值，或 `schtasks /sc onstart` |
 | 是否已切正式拦截 | 建议先 `--shadow` | 观察 1~2 周无误停后去掉 `--shadow` |
@@ -722,6 +725,43 @@ python scripts/regression_5472.py  # 5472 横/竖图 + 真实锚点：期望 11/
 `regression_5472.py` 只读样本库里的少量锚点（正常 917/915/912、模糊 007~010），
 不会改动数据；数据根目录用 `--data` 或环境变量 `ROOTBOX_QC_DATA` 指定（见下节）。
 
+## 部署到目标机（换机器不用改代码）
+
+仓库里**不含任何机器相关的绝对路径**：目录要么命令行传，要么环境变量给，要么写进
+`service_env.bat`（已在 `.gitignore`，所以 `run_service.bat` 不用改）。
+
+| 变量 | 用途 | 必填 |
+|---|---|---|
+| `ROOTBOX_QC_WATCH_DIR` | 小车落图目录，结构 `<批次>\<编号>\1.png + 2.png` | 监听服务必填 |
+| `ROOTBOX_QC_STITCH_DIR` | 拼接成品**父目录**（服务按批次建子目录） | 生产必填 |
+| `ROOTBOX_QC_STITCH_SCRIPT` | 提供 `stitch_from_qc(img_a, img_b, out_path)` 的拼接脚本 | 生产必填 |
+| `ROOTBOX_QC_OUTPUT_DIR` | 报告 / 队列 / 状态 / 日志 | 可选，默认 `./results` |
+| `ROOTBOX_QC_PYTHON` | 该机器上装了 cv2 / numpy 的解释器 | 可选，默认 PATH 的 `python` |
+| `ROOTBOX_QC_HEALTH_PORT` | `/health` `/metrics` 端口 | 可选，默认 8090 |
+| `ROOTBOX_QC_CALLBACK_URL` | 结果 HTTP 回调（不给就只写反馈文件） | 可选 |
+| `ROOTBOX_QC_SHADOW` | `1` = 只记录不拦车，观察期用 | 可选 |
+| `ROOTBOX_QC_DATA` | 真样本根目录（跑回归用） | 可选 |
+
+部署步骤：
+
+```bat
+rem 1. 拷代码到目标机，装依赖
+pip install -r rootbox_test\requirements.txt
+
+rem 2. 填现场配置（不改 run_service.bat）
+copy rootbox_test\service_env.example.bat rootbox_test\service_env.bat
+notepad rootbox_test\service_env.bat
+
+rem 3. 先旁路观察
+run_service.bat --shadow
+rem 另开一个窗口确认健康
+curl http://127.0.0.1:8090/health
+
+rem 4. 观察 1~2 周无误停后，去掉 --shadow 才是正式拦截
+```
+
+配置不全时服务不会带病启动：启动自检不过直接退出码 3，并列出缺哪一项。
+
 ## 数据放在哪（不进仓库）
 
 图像样本**不进 Git 仓库**，以免仓库体积膨胀、也避免现场原图外流。当前放在仓库外的：
@@ -731,11 +771,12 @@ python scripts/regression_5472.py  # 5472 横/竖图 + 真实锚点：期望 11/
 | `D:\data\dataed` | 分好类的复核集（`正常/不全/模糊/损坏/错位/重复拍摄\<编号>\1.png+2.png`） | 950 文件 ≈ 21.7 GB |
 | `D:\data\data` | 主池（含 dataed 并入前的历史样本） | 896 文件 ≈ 23.4 GB |
 
+- 上表是**当前开发机**的位置；仓库和代码里都不写死它，换机器不受影响。
 - `.gitignore` 里仍保留 `data/`、`dataed/` 两条，防止有人把目录拷回仓库后误提交。
-- 需要真实样本的脚本都支持指定根目录：`--data <路径>` 或环境变量 `ROOTBOX_QC_DATA`；
-  默认值为 `D:\data\dataed`。
-- 换机器 / 对外分发时，只需准备同样结构的目录并设 `ROOTBOX_QC_DATA`；
-  `scripts/smoke_test.py` 用合成图，**没有真实样本也能跑**。
+- 需要真实样本的脚本用 `--data <路径>` 或环境变量 `ROOTBOX_QC_DATA` 指定根目录，**没有内置默认值**；
+  没给时 `regression_5472.py` 只跑合成图部分，`service_test.py` 直接提示缺样本；
+`service_test.py` 还额外要拼接脚本（`--stitch-script` / `ROOTBOX_QC_STITCH_SCRIPT`）与拼接输出目录（`ROOTBOX_QC_STITCH_DIR`）。
+- `scripts/smoke_test.py` 用合成图，**没有真实样本也能跑**。
 
 ## 常见问题
 

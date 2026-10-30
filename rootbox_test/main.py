@@ -2,12 +2,12 @@
 
 线上（拍摄即检）接入请直接用包 API，不走本文件：
     from rootbox_qc import verify_single, verify_pair
-    rep = verify_single(r"D:\\data\\001\\1.png", attempt=1)
+    rep = verify_single(r"<落图目录>\\<编号>\\1.png", attempt=1)
     if rep.recapture_needed:
         print(rep.recapture_reasons)   # → 通知小车重拍第 1 张
 
 用法：
-    1. 设置环境变量 ROOTBOX_QC_INPUT_DIR，或修改 config.py 的 paths.input_dir
+    1. 设置环境变量 ROOTBOX_QC_INPUT_DIR（config.py 不再内置任何机器路径）
     2. 运行：右键 → Run 'main'（或 py main.py）
 
 可选：

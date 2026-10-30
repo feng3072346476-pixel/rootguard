@@ -3,8 +3,9 @@
 生产使用说明
 ============
 - 所有阈值集中在 THRESHOLDS，现场标定只改这里（或通过 run(*, thresholds=...) 临时覆盖）。
-- 支持环境变量 ROOTBOX_QC_INPUT_DIR 覆盖拍照落盘目录（部署脚本用）。
-- 任何 yaml / 环境变量均可选；不配置就用下面的默认值。
+- 这里**不写任何机器相关的绝对路径**：目录要么由调用方传参，要么用环境变量给。
+  目标机上要设的变量见 README「部署到目标机」；run_service.bat 会读 service_env.bat。
+- 任何 yaml / 环境变量均可选；没配的目录就是 None，用到时会给出明确报错。
 """
 from __future__ import annotations
 
@@ -20,7 +21,8 @@ PATHS = {
     #   2) 单层：<dir>/<编号>/1.png + <编号>/2.png
     #   3) 双层：<dir>/<类别>/<编号>/1.png + <编号>/2.png
     #   4) 根目录无图：自动汇总所有含图的子目录
-    "input_dir": r"D:\qc\in",          # ← 部署时改成实际目录（也可用环境变量 ROOTBOX_QC_INPUT_DIR）
+    # 值来自环境变量；没设就是 None（调用 run(input_dir=...) 或 --watch 时再给）。
+    "input_dir": os.environ.get("ROOTBOX_QC_INPUT_DIR") or None,
 
     # 报告输出目录（每对一张 JSON）
     "output_dir": "./results",
@@ -39,9 +41,9 @@ PATHS = {
     "stitch_output_dir": os.environ.get("ROOTBOX_QC_STITCH_DIR") or None,
 
     # 无缝拼接脚本路径（可选功能；启用 stitch_output_dir 时必须存在且可加载）
-    # 脚本需提供 stitch_from_qc(img_a, img_b, out_path) 函数；部署时改成目标机路径
-    "stitch_script": (os.environ.get("ROOTBOX_QC_STITCH_SCRIPT")
-                      or r"d:\tupianpj\图片拼接2.py"),
+    # 脚本需提供 stitch_from_qc(img_a, img_b, out_path) 函数；路径由目标机用
+    # 环境变量 ROOTBOX_QC_STITCH_SCRIPT 或 --stitch-script 指定
+    "stitch_script": os.environ.get("ROOTBOX_QC_STITCH_SCRIPT") or None,
 }
 
 # ============================================================================

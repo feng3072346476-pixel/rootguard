@@ -1,4 +1,4 @@
-"""按现行生产判据重分类 D:\\pic\\data 主池（dataed 已并入 data）。
+"""按现行生产判据重分类主池（ROOTBOX_QC_DATA 指向，dataed 已并入 data）。
 
 `--include-total` 把 data\\total 中不在主池的单元一并检测（total 只留源件）。
 
@@ -10,7 +10,7 @@
 - 黑块平图过滤：损坏原因为"局部纯黑区"且自适应缝链长 < 3 时，固定缝窗
   兜底的错位读数来自黑区噪声，剔除错位（仅影响单张平图）。
 
-用法：
+用法（先 set ROOTBOX_QC_DATA=<主池根目录>）：
   python scripts/reclass_data.py scan [--include-total]   # 跑全池检查，写缓存
   python scripts/reclass_data.py plan [--include-total]   # 生成目标标签计划
   python scripts/reclass_data.py apply --dry-run [--include-total]
@@ -30,10 +30,16 @@ import shutil
 import sys
 import time
 
-ROOT = r"D:\pic\data"
-TOTAL = os.path.join(ROOT, "total")
-TABLE = os.path.join(ROOT, "明细.csv")
-PROBE = r"D:\pic\rootbox_test\results\_probe"
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_PKG_ROOT = os.path.dirname(_HERE)          # rootbox_test 目录（脚本的上一级）
+
+# 主池根目录 / 探针产物目录：不写死本机路径，换机器用环境变量给
+#   ROOTBOX_QC_DATA        主池根目录（下面有 正常/不全/损坏/模糊/错位/重复拍摄）
+#   ROOTBOX_QC_PROBE_DIR   可选，默认 <rootbox_test>/results/_probe
+ROOT = os.environ.get("ROOTBOX_QC_DATA") or ""
+TOTAL = os.path.join(ROOT, "total") if ROOT else ""
+TABLE = os.path.join(ROOT, "明细.csv") if ROOT else ""
+PROBE = os.environ.get("ROOTBOX_QC_PROBE_DIR") or os.path.join(_PKG_ROOT, "results", "_probe")
 CLASSES = ["正常", "不全", "损坏", "模糊", "重复拍摄", "错位"]
 DEFECTS = ["损坏", "模糊", "不全", "错位", "重复拍摄"]   # 主分类优先级
 IMG_EXT = (".png", ".jpg", ".jpeg", ".bmp")
@@ -82,7 +88,8 @@ def enumerate_units(root=ROOT, include_total=False):
 
 def _scan_one(item):
     unit, kind, src = item
-    sys.path.insert(0, r"D:\pic\rootbox_test")
+    if _PKG_ROOT not in sys.path:
+        sys.path.insert(0, _PKG_ROOT)
     from rootbox_qc import verify
     cfg = verify._as_cfg(None)
     rec = {"unit": unit, "kind": kind, "src": src,
@@ -468,9 +475,13 @@ def main():
     ap.add_argument("--only-class", default=None,
                     help="仅扫描/处理指定分类目录下的单元（如 正常）")
     args = ap.parse_args()
+    if not ROOT:
+        print("  错误：未指定主池根目录，请 set ROOTBOX_QC_DATA=<主池根目录>")
+        return 2
     {"scan": cmd_scan, "plan": cmd_plan,
      "apply": cmd_apply, "verify": cmd_verify}[args.cmd](args)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
