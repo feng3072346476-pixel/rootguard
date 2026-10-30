@@ -581,7 +581,7 @@ rootbox_qc）。目标机需装 Python 3.9+，且 `pip install -r requirements.t
 ```text
 <watch>\data1030\0001\1.png     ← 批次目录 / 编号目录 / 1.png + 2.png
 <watch>\data1030\0001\2.png
-save\data1030\0001.png          ← 拼接成品落点（列号为质检合格才产出）
+<save>\data1030\0001.png        ← 拼接成品落点（质检合格才产出）
 ```
 
 即 `<watch>\<批次>\<编号>\1.png + 2.png`，`pair_id` = `批次__编号`（如 `data1030__0001`）；
@@ -602,12 +602,17 @@ save\data1030\0001.png          ← 拼接成品落点（列号为质检合格�
 ### 启动
 
 ```bat
-set ROOTBOX_QC_STITCH_DIR=D:\yy1\qc\stitch
-python run_service.py --watch D:\yy1\qc_in --out D:\yy1\qc_out --health-port 8090
-rem 或：run_service.bat --watch D:\yy1\qc_in --out D:\yy1\qc_out --health-port 8090
-rem 拼接目录也可以走命令行（优先于环境变量）：
-rem   --stitch-dir D:\yy1\qc\stitch --stitch-script d:\tupianpj\图片拼接2.py
+rem 现场路径先用命令行传，等确认后固化成 .bat 默认值
+python run_service.py --watch D:\yy1\in --out D:\yy1\qc_out ^
+    --stitch-dir D:\yy1\save --stitch-script "d:\tupianpj\图片拼接2.py" ^
+    --health-port 8090 --shadow
+
+rem 或：run_service.bat --watch D:\yy1\in --out D:\yy1\qc_out --stitch-dir D:\yy1\save --shadow
+rem 确认无误后去掉 --shadow 即正式拦截
 ```
+
+- `--stitch-dir` 给**成品的父目录**（现场的 `save`），服务会自动按批次建子目录 `save\<批次>\`。
+- `--stitch-script` 指向提供 `stitch_from_qc` 的拼接脚本（现用 `d:\tupianpj\图片拼接2.py`）。
 
 - **fail-closed 自检**（不过就退出码 3，不会带半套配置上线）：监听/输出/反馈/日志目录可写且不重叠；
   `require_stitch` 时 `stitch_output_dir` 必须配、`stitch_script` 必须存在且能加载出 `stitch_from_qc`；
@@ -629,11 +634,12 @@ rem   --stitch-dir D:\yy1\qc\stitch --stitch-script d:\tupianpj\图片拼接2.py
 
 ```json
 {
-  "pair_id": "1491",
+  "pair_id": "data1030__0002",
+  "mode": "live",
   "status": "fail",
   "passed": false,
   "recapture_needed": true,
-  "targets": ["D:\\yy1\\qc_in\\1491\\1.png", "D:\\yy1\\qc_in\\1491\\2.png"],
+  "targets": ["D:\\yy1\\in\\data1030\\0002\\1.png", "D:\\yy1\\in\\data1030\\0002\\2.png"],
   "reasons": ["[1.png] 底部金属长边结构缺失/不明显（底部挺直度 0.220 < 0.35 且目标底梁带 0.220 < 0.28），疑似未拍全根盒下侧"],
   "attempt": 1,
   "max_attempts": 3,
@@ -644,9 +650,9 @@ rem   --stitch-dir D:\yy1\qc\stitch --stitch-script d:\tupianpj\图片拼接2.py
   "resolution_mismatch": false,
   "elapsed_ms": 1512.0,
   "processed_at": "2026-10-30T13:30:12",
-  "report_file": "1491.json",
+  "report_file": "data1030__0002.json",
   "batch": "data1030",
-  "number": "0001",
+  "number": "0002",
   "degraded": []
 }
 ```
@@ -685,8 +691,20 @@ rem   --stitch-dir D:\yy1\qc\stitch --stitch-script d:\tupianpj\图片拼接2.py
 实测（本机，含拼接复检）：合格对 5.4~5.6s，不合格对 1.4~1.5s，串行。多工位并发需多进程/多输出目录。
 
 ```bash
-python scripts/service_test.py    # 真图 × 真拼接脚本 × 真 HTTP，期望 31 项全 PASS
+python scripts/service_test.py    # 真图 × 真拼接脚本 × 真 HTTP，期望 39 项全 PASS
 ```
+
+### 现场待定（后续再改）
+
+代码已按产线结构（`<批次>\<编号>` + `save\data1030\0001.png`）对齐并测过，下面几项等现场确认后只需改配置/脚本，不动质检逻辑：
+
+| 待定项 | 现状 | 确认后怎么改 |
+|---|---|---|
+| 落图根目录 `--watch` | 用示例路径 `D:\yy1\in` | 换成小车实际落图目录 |
+| 成品根目录 `--stitch-dir` | 用示例路径 `D:\yy1\save` | 换成现场 `save` 的绝对路径 |
+| 小车怎么拿反馈 | 读 `feedback\<批次>\<编号>.json`（已镜像） | 若走 HTTP，加 `--callback http://<小车>:<端口>/...` |
+| 开机自启 | 未固化 | 改 `run_service.bat` 顶部默认值，或 `schtasks /sc onstart` |
+| 是否已切正式拦截 | 建议先 `--shadow` | 观察 1~2 周无误停后去掉 `--shadow` |
 
 ## 自检
 
