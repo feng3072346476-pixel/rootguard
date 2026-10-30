@@ -38,7 +38,7 @@ from rootbox_qc.service import (  # noqa: E402
     Settings, StartupError, WatchService, discover, setup_service_logging,
 )
 
-DATAED = r"D:\rootguard\dataed"
+DATAED = os.environ.get("ROOTBOX_QC_DATA", r"D:\data\dataed")
 WORK = os.path.join(PKG_ROOT, "_tmp", "service_test")
 PASS_PAIR = ("正常", "067")
 FAIL_PAIR = ("不全", "1491")
