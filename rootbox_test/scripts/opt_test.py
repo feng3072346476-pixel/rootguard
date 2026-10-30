@@ -77,6 +77,20 @@ try:
     rs = checks.check_blur(cv2.cvtColor(sharp_s, cv2.COLOR_GRAY2BGR), sharp_s, frame_mod.detect_frame(sharp_s, fp), th)
     ro = checks.check_blur(cv2.cvtColor(soft_s, cv2.COLOR_GRAY2BGR), soft_s, frame_mod.detect_frame(soft_s, fp), th)
     check("清晰图通过、失焦图被 ROI 方差拦截", rs["passed"] and not ro["passed"], ro["reason"])
+    # 成品平图没有存活列语义，靠 6x8 分块 Laplacian 方差 p10 抓整体失焦；
+    # 这里让 ROI 方差仍 >20，确保是纹理门而不是 ROI 兜底在拦截。
+    rng_t = np.random.default_rng(7)
+    tex = np.clip(rng_t.normal(150, 8, (1600, 1200)), 20, 240).astype(np.uint8)
+    tex_soft = cv2.GaussianBlur(tex, (0, 0), 0.8)
+    th_m = dict(th)
+    th_m["input_kind"] = "mosaic"
+    th_m["blur_strip_metric_enabled"] = False
+    rt = checks.check_blur(cv2.cvtColor(tex, cv2.COLOR_GRAY2BGR), tex, None, th_m)
+    rto = checks.check_blur(cv2.cvtColor(tex_soft, cv2.COLOR_GRAY2BGR), tex_soft, None, th_m)
+    check("成品图纹理清晰通过、整体轻失焦被 p10 拦截",
+          rt["passed"] and not rto["passed"]
+          and rt["metric"]["mosaic_tile_lap_p10"] >= 40 > rto["metric"]["mosaic_tile_lap_p10"],
+          f"{rt['metric']['mosaic_tile_lap_p10']} / {rto['metric']['mosaic_tile_lap_p10']}")
 
     print("== 3. 不全：Rule A 底部长边结构缺失 ==")
     full_box = bg()

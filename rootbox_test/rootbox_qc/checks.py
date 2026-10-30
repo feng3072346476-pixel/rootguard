@@ -269,6 +269,33 @@ def _strip_led_ratio(gray, cuts, role: str | None) -> float | None:
     return round(float((alive > 200).mean()), 5)
 
 
+def _mosaic_tile_lap_p10(gray, width: int = 1600, rows: int = 6, cols: int = 8) -> float | None:
+    """成品平图整体纹理锐度：分块 Laplacian 方差的第 10 百分位。
+
+    成品图没有原图那种“存活列/取片列”语义，不能用角色存活方差判；
+    但整幅失焦/拖影会让大部分分块都变软。取 p10 而不是均值，避免手、
+    灯管高光等少数极锐分块把整体拉高。013/019 约为 21/25，正常平图最低约 58。
+    """
+    if gray is None:
+        return None
+    g = gray
+    h0, w0 = g.shape[:2]
+    if w0 > width:
+        s = width / float(w0)
+        g = cv2.resize(g, (width, max(1, int(h0 * s))), interpolation=cv2.INTER_AREA)
+    lap = cv2.Laplacian(g, cv2.CV_64F)
+    h, w = lap.shape[:2]
+    if h < rows or w < cols:
+        return None
+    tile_h, tile_w = h // rows, w // cols
+    vals = []
+    for i in range(rows):
+        for j in range(cols):
+            tile = lap[i * tile_h:(i + 1) * tile_h, j * tile_w:(j + 1) * tile_w]
+            vals.append(float(tile.var()))
+    return round(float(np.percentile(vals, 10)), 2)
+
+
 def check_blur_pair(img_a, img_b, frame_a, frame_b, th: dict | None = None, *,
                     path_a: str | None = None, path_b: str | None = None) -> dict:
     """成对模糊：两张里一张锐、一张糊（亮区 Laplacian 方差不对称）。"""
@@ -353,6 +380,17 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
     if var < var_min:
         reasons.append(f"亮区纹理锐度不足（Laplacian 方差 {var:.1f} < {var_min:.1f}）")
 
+    if th.get("input_kind") == "mosaic" and bool(
+            th.get("blur_mosaic_texture_check_enabled", True)):
+        p10 = _mosaic_tile_lap_p10(gray)
+        metric["mosaic_tile_lap_p10"] = p10
+        p10_min = float(th.get("blur_mosaic_tile_lap_p10_min", 40.0))
+        threshold["blur_mosaic_tile_lap_p10_min"] = p10_min
+        if p10 is not None and p10 < p10_min:
+            reasons.append(
+                f"拼接成品图整体纹理锐度不足（6x8 分块 Laplacian 方差 p10 "
+                f"{p10:.1f} < {p10_min:.1f}），疑似整体失焦/拖影")
+
     if bool(th.get("blur_strip_metric_enabled", True)):
         cuts = _active_cuts(th)
         sa, sb = _mosaic_strip_var(gray, cuts)
@@ -369,7 +407,7 @@ def check_blur(img_bgr, gray, frame, th: dict | None = None, path: str | None = 
         metric["blur_strip_surviving_var"] = surviving
         led_ratio = _strip_led_ratio(gray, cuts, role)
         metric["blur_strip_alive_led_ratio"] = led_ratio
-        threshold["blur_strip_alive_var_min"] = float(th.get("blur_strip_alive_var_min", 46.0))
+        threshold["blur_strip_alive_var_min"] = float(th.get("blur_strip_alive_var_min", 48.5))
         threshold["blur_strip_surviving_var_min"] = float(
             th.get("blur_strip_surviving_var_min", 26.5))
         threshold["blur_strip_alive_led_ratio_min"] = float(

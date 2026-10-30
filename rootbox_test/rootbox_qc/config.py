@@ -99,9 +99,12 @@ THRESHOLDS = {
     "blur_var_min": 20.0,                    # 亮区 ROI Laplacian 方差下限（兜底全糊与散装成品图）
     "blur_strip_metric_enabled": True,
     "blur_strip_check_enabled": True,
-    "blur_strip_alive_var_min": 46.0,        # 角色对应的反光侧存活列 Laplacian 方差下限
+    "blur_strip_alive_var_min": 48.5,        # 角色对应的反光侧存活列 Laplacian 方差下限；092=47.8、485=48.3，正常 915=49.5
     "blur_strip_surviving_var_min": 26.5,    # 角色对应的无反光取片列 Laplacian 方差下限
     "blur_strip_alive_led_ratio_min": 0.005, # 存活列高亮灯管像素占比下限；低于此值视为该侧无灯，跳过存活列判据
+    # 成品平图没有“存活列”概念，用整体分块纹理兜底 013/019 这类无灯管、整体失焦的图。
+    "blur_mosaic_texture_check_enabled": True,
+    "blur_mosaic_tile_lap_p10_min": 40.0,    # 6x8 分块 Laplacian 方差 p10 下限；013=21.5、019=25.2，正常最低 57.9
     # layout=None 表示按现行 C 线；切旧角度时设 layout="A"/"B"，整套刀口一起切。
     # blur_strip_cuts 仅作为自定义覆盖：layout 非空时以 layout 为准。
     "layout": None,
