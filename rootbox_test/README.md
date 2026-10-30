@@ -576,12 +576,23 @@ rootbox_qc）。目标机需装 Python 3.9+，且 `pip install -r requirements.t
 
 ### 落图约定（小车侧）
 
-| 写法 | 例子 | pair_id |
-|---|---|---|
-| 编号子目录 | `<watch>\052\1.png` + `2.png` | `052` |
-| 任意两张 | `<watch>\052\a.png` + `b.png`（目录里正好 2 张） | `052` |
-| 批次 + 编号 | `<watch>\20261030\052\1.png` | `20261030__052` |
-| 平铺 | `<watch>\052_1.png` + `052_2.png` | `052` |
+**现行产线结构**（2026-10-30 确认）：
+
+```text
+<watch>\data1030\0001\1.png     ← 批次目录 / 编号目录 / 1.png + 2.png
+<watch>\data1030\0001\2.png
+save\data1030\0001.png          ← 拼接成品落点（列号为质检合格才产出）
+```
+
+即 `<watch>\<批次>\<编号>\1.png + 2.png`，`pair_id` = `批次__编号`（如 `data1030__0001`）；
+成品落到 `--stitch-dir`（即 `save`）下的 `<批次>\<编号>.png`，与产线原有命名一致。
+
+| 写法 | 例子 | pair_id | 成品落点 |
+|---|---|---|---|
+| **批次 + 编号（产线现行）** | `<watch>\data1030\0001\1.png` | `data1030__0001` | `<save>\data1030\0001.png` |
+| 编号子目录 | `<watch>\052\1.png` + `2.png` | `052` | `<save>\052.png` |
+| 任意两张 | `<watch>\052\a.png` + `b.png`（目录里正好 2 张） | `052` | `<save>\052.png` |
+| 平铺 | `<watch>\052_1.png` + `052_2.png` | `052` | `<save>\052.png` |
 
 - 目录里正好 2 张图即视为一对；多于 2 张只认 `1/2` 命名，否则跳过并在日志 warning。
 - 支持 `.png/.jpg/.jpeg/.bmp`；忽略隐藏目录、`__pycache__`、`done/`、`output/`、`feedback/`、`logs/`。
@@ -608,9 +619,10 @@ rem   --stitch-dir D:\yy1\qc\stitch --stitch-script d:\tupianpj\图片拼接2.py
 
 | 文件 | 用途 |
 |---|---|
-| `<out>\feedback\<pair_id>.json` | 单对结论，**小车只读这一个**；原子写（tmp+fsync+replace），不会读到半个 JSON |
+| `<out>\feedback\<pair_id>.json` | 单对结论（扁平，按 pair_id 命名），**小车读这个最省事**；原子写（tmp+fsync+replace），不会读到半个 JSON |
+| `<out>\feedback\<批次>\<编号>.json` | 同上内容的镜像，路径跟落图结构对齐（`data1030\0001.json`），便于小车按自己的目录树取 |
 | `<out>\feedback\feedback.jsonl` | 追加流水，夜间批量汇总用 |
-| `<out>\<pair_id>.json` | 完整报告（每张图逐项 checks），排障用 |
+| `<out>\<pair_id>.json` | 完整报告（每张图逐项 checks、成品复检、重拍历史），排障用 |
 | `<out>\recapture_queue.jsonl` | 重拍队列（shadow 时写 `shadow_queue.jsonl`） |
 
 单对结论示例：
@@ -633,6 +645,8 @@ rem   --stitch-dir D:\yy1\qc\stitch --stitch-script d:\tupianpj\图片拼接2.py
   "elapsed_ms": 1512.0,
   "processed_at": "2026-10-30T13:30:12",
   "report_file": "1491.json",
+  "batch": "data1030",
+  "number": "0001",
   "degraded": []
 }
 ```

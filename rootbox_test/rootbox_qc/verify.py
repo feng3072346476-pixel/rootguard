@@ -219,15 +219,20 @@ def _load_stitch_module(stitch_script: str):
 
 
 def _stitch_in_memory(img_a: np.ndarray, img_b: np.ndarray, pair_id: str,
-                      stitch_output_dir: str, stitch_script: str) -> str:
-    """质检通过后直接将内存中已解码的 img_a, img_b 送入无缝拼接模块。"""
+                      stitch_output_dir: str, stitch_script: str,
+                      out_name: str | None = None) -> str:
+    """质检通过后直接将内存中已解码的 img_a, img_b 送入无缝拼接模块。
+
+    out_name 指定成品文件名（不含扩展名）；默认用 pair_id。落图目录是
+    <watch>/<批次>/<编号>/ 时，线上约定成品是 save/<批次>/<编号>.png。
+    """
     if not stitch_script or not os.path.isfile(stitch_script):
         raise FileNotFoundError(
             f"无缝拼接脚本不存在: {stitch_script!r}"
             "（配置 paths.stitch_script 或环境变量 ROOTBOX_QC_STITCH_SCRIPT）")
     mod = _load_stitch_module(stitch_script)
     os.makedirs(stitch_output_dir, exist_ok=True)
-    out_path = os.path.join(stitch_output_dir, f"{pair_id}.png")
+    out_path = os.path.join(stitch_output_dir, f"{out_name or pair_id}.png")
     res_path = mod.stitch_from_qc(img_a, img_b, out_path)
     return res_path if res_path else out_path
 
@@ -354,6 +359,7 @@ def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
                 input_kind: str | None = None,
                 stitch_output_dir: str | None = None,
                 verify_stitched: bool | None = None,
+                stitch_name: str | None = None,
                 res_a: ImageResult | QCReport | None = None,
                 res_b: ImageResult | QCReport | None = None) -> QCReport:
     """两张灯照成对校验：单图先过 -> 成对比对 -> 拼接 -> 拼接成品复检。
@@ -365,6 +371,9 @@ def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
     两张都通过后才比对，随后将内存中的 img_a/img_b 送入 cfg.paths.stitch_script 拼接，
     并对 <pair_id>.png 按 mosaic 再跑一遍单图检查（模糊/不全/单图错位/损坏）。
     拼接成品未通过时，report.status 置为 fail/undetermined，重拍目标指向两张原图。
+
+    stitch_name: 成品文件名（不含扩展名），默认取 pair_id；落图是
+    <watch>/<批次>/<编号>/ 时用来落成 save/<批次>/<编号>.png。
 
     verify_stitched: True/False 强制开关；None（默认）时，只要配置了 stitch_output_dir
     就复检。拼接脚本缺失/执行失败时记入 stitch_error；要求复检时按 undetermined 阻塞，
@@ -442,7 +451,8 @@ def verify_pair(path_a, path_b=None, cfg: dict | None = None, *,
             and path_b is not None and img_a is not None and img_b is not None):
         try:
             report.stitched_path = _stitch_in_memory(
-                img_a, img_b, report.pair_id, eff_stitch_dir, stitch_script)
+                img_a, img_b, report.pair_id, eff_stitch_dir, stitch_script,
+                out_name=stitch_name)
         except Exception as e:  # noqa: BLE001 —— 显式暴露，是否阻塞由 verify_stitched 决定
             report.stitch_error = f"无缝拼接失败: {e}"
             logger.error("%s pair=%s", report.stitch_error, report.pair_id)

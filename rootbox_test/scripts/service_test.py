@@ -305,6 +305,45 @@ def test_health_and_idempotency(cfg: dict, base: str) -> bool:
     return ok
 
 
+# ------------------------------------------------------------------------ 8
+def test_production_layout(cfg: dict, base: str) -> bool:
+    """产线真实结构：<watch>/data1030/0001/1.png → save/data1030/0001.png。"""
+    print("\n[8] 产线目录结构：批次/编号 → save/<批次>/<编号>.png")
+    b = base
+    pair_dir = os.path.join(b, "watch", "data1030", "0001")
+    link_pair(os.path.join(DATAED, *PASS_PAIR), pair_dir)
+
+    cands = discover(os.path.join(b, "watch"), cfg)
+    ok = check("识别 data1030__0001", [c.pair_id for c in cands] == ["data1030__0001"],
+               str([c.pair_id for c in cands]))
+    ok &= check("带上批次/编号", cands and cands[0].batch == "data1030"
+                and cands[0].number == "0001",
+                str((cands[0].batch, cands[0].number)) if cands else "无候选")
+
+    svc = WatchService(make_settings(cfg, b, shadow=False), cfg)
+    svc.run_forever()
+
+    stitched = os.path.join((cfg.get("paths") or {})["stitch_output_dir"],
+                            "data1030", "0001.png")
+    ok &= check("成品落到 save/data1030/0001.png", os.path.isfile(stitched), stitched)
+    ok &= check("成品不是 data1030__0001.png",
+                not os.path.isfile(os.path.join(
+                    (cfg.get("paths") or {})["stitch_output_dir"],
+                    "data1030__0001.png")))
+    rep = read_json(os.path.join(b, "out", "data1030__0001.json"))
+    ok &= check("报告里 stitched_path 指向成品", os.path.normcase(
+        rep.get("stitched_path") or "") == os.path.normcase(stitched),
+        str(rep.get("stitched_path")))
+    fb = read_json(os.path.join(b, "feedback", "data1030__0001.json"))
+    ok &= check("扁平反馈带 batch/number", fb.get("batch") == "data1030"
+                and fb.get("number") == "0001", str({k: fb.get(k) for k in ("batch", "number")}))
+    mirror = os.path.join(b, "feedback", "data1030", "0001.json")
+    ok &= check("镜像反馈 feedback/data1030/0001.json", os.path.isfile(mirror), mirror)
+    if os.path.isfile(mirror):
+        ok &= check("镜像内容与扁平一致", read_json(mirror)["pair_id"] == "data1030__0001")
+    return ok
+
+
 def main() -> int:
     global DATAED
     ap = argparse.ArgumentParser()
@@ -333,6 +372,7 @@ def main() -> int:
     ok &= test_shadow(cfg, os.path.join(WORK, "shadow"))
     ok &= test_live_and_retake(cfg, os.path.join(WORK, "live"))
     ok &= test_health_and_idempotency(cfg, os.path.join(WORK, "health"))
+    ok &= test_production_layout(cfg, os.path.join(WORK, "prod"))
     dt = time.perf_counter() - t0
 
     print(f"\n{'='*60}\n通过 {len(PASSED)} 项，失败 {len(FAILED)} 项，"

@@ -190,6 +190,8 @@ class Candidate:
     path_a: str
     path_b: str
     fingerprint: tuple = field(default_factory=tuple)
+    batch: str | None = None      # 落图 <watch>/<批次>/<编号>/ 时的批次名
+    number: str | None = None     # 同上时的编号，用来落 save/<批次>/<编号>.png
 
 
 # ============================================================================
@@ -516,7 +518,8 @@ def discover(watch_dir: str, cfg: dict, skip_paths=()) -> list[Candidate]:
                     if picked2:
                         pid = _safe_id(f"{e.name}/{sub.name}")
                         cands.append(Candidate(pid, picked2[0], picked2[1],
-                                               _fingerprint(picked2)))
+                                               _fingerprint(picked2),
+                                               batch=e.name, number=sub.name))
             elif len(imgs) > 2:
                 logger.warning("目录内图片数=%d 且认不出 1/2 命名，跳过：%s",
                                len(imgs), e.path)
@@ -881,18 +884,30 @@ class WatchService:
         return (now - seen[1]) >= self.settings.settle_seconds
 
     # ---------------------------------------------------------------- 处理
+    def _stitch_target(self, c: Candidate, paths: dict) -> tuple[str | None, str | None]:
+        """成品落点：<stitch>/<批次>/<编号>.png，与产线 save/data1030/0001.png 对齐。
+
+        平铺或单层落图没有批次信息，保持 <stitch>/<pair_id>.png。
+        """
+        base = paths.get("stitch_output_dir")
+        if not base or not c.batch or not c.number:
+            return base, None
+        return os.path.join(base, c.batch), c.number
+
     def process(self, c: Candidate) -> None:
         s = self.settings
         paths = self.cfg.get("paths") or {}
         attempt = max(1, self.tracker.next_attempt(c.pair_id))
         t0 = time.perf_counter()
+        stitch_dir, stitch_name = self._stitch_target(c, paths)
         logger.info("开始质检 %s attempt=%d a=%s b=%s", c.pair_id, attempt,
                     c.path_a, c.path_b)
         try:
             report = verify_pair(
                 c.path_a, c.path_b, cfg=self.cfg, pair_id=c.pair_id, attempt=attempt,
-                stitch_output_dir=paths.get("stitch_output_dir"),
+                stitch_output_dir=stitch_dir,
                 verify_stitched=bool(s.require_stitch),
+                stitch_name=stitch_name,
             )
             self.tracker.observe(report)
         except Exception as e:  # noqa: BLE001 —— 单对异常绝不能带崩服务
@@ -959,6 +974,8 @@ class WatchService:
             "stitch_error": report.stitch_error,
             "resolution_mismatch": resolution_mismatch,
             "images": {"a": c.path_a, "b": c.path_b},
+            "batch": c.batch,
+            "number": c.number,
             "elapsed_ms": round(elapsed_ms, 1),
             "processed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "report_file": f"{report.pair_id}.json",
@@ -1001,6 +1018,8 @@ class WatchService:
             "stitch_error": None,
             "resolution_mismatch": False,
             "images": {"a": c.path_a, "b": c.path_b},
+            "batch": c.batch,
+            "number": c.number,
             "elapsed_ms": round(elapsed_ms, 1),
             "processed_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "report_file": None,
@@ -1014,6 +1033,12 @@ class WatchService:
         try:
             os.makedirs(s.feedback_dir, exist_ok=True)
             _atomic_json(os.path.join(s.feedback_dir, f"{doc['pair_id']}.json"), public)
+            # 镜像一份到 feedback/<批次>/<编号>.json，跟落图目录结构对得上
+            if doc.get("batch") and doc.get("number"):
+                mirror = os.path.join(s.feedback_dir, doc["batch"],
+                                      f"{doc['number']}.json")
+                os.makedirs(os.path.dirname(mirror), exist_ok=True)
+                _atomic_json(mirror, public)
         except OSError as e:
             logger.error("写反馈文件失败 %s: %s", doc["pair_id"], e)
             self.metrics.inc("errors_total")
