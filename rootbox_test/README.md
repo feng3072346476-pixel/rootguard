@@ -594,6 +594,8 @@ rootbox_qc）。目标机需装 Python 3.9+，且 `pip install -r requirements.t
 set ROOTBOX_QC_STITCH_DIR=D:\yy1\qc\stitch
 python run_service.py --watch D:\yy1\qc_in --out D:\yy1\qc_out --health-port 8090
 rem 或：run_service.bat --watch D:\yy1\qc_in --out D:\yy1\qc_out --health-port 8090
+rem 拼接目录也可以走命令行（优先于环境变量）：
+rem   --stitch-dir D:\yy1\qc\stitch --stitch-script d:\tupianpj\图片拼接2.py
 ```
 
 - **fail-closed 自检**（不过就退出码 3，不会带半套配置上线）：监听/输出/反馈/日志目录可写且不重叠；

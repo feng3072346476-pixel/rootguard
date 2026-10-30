@@ -923,9 +923,11 @@ class WatchService:
         self.state.save()
         self.metrics.observe(doc)
         self._seen.pop(c.pair_id, None)
-        logger.info("完成 %s status=%s recapture=%s stitched=%s %.0fms",
-                    c.pair_id, report.status,
-                    doc.get("would_recapture") if s.shadow else report.recapture_needed,
+        _retake_label = "would_recapture" if s.shadow else "recapture"
+        _retake_value = (doc.get("would_recapture") if s.shadow
+                         else report.recapture_needed)
+        logger.info("完成 %s status=%s %s=%s stitched=%s %.0fms",
+                    c.pair_id, report.status, _retake_label, _retake_value,
                     report.stitched_status, elapsed_ms)
         if report.escalate_manual:
             logger.error("%s 已达 max_attempts=%d 仍不合格，转人工：%s",
@@ -1112,6 +1114,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--health-port", type=int, default=None,
                    help="健康检查端口；0=关闭（默认），建议 8090")
     p.add_argument("--callback", dest="callback_url", help="结果 HTTP 回调地址（可选）")
+    p.add_argument("--stitch-dir", dest="stitch_dir",
+                   help="拼接成品输出目录（生产必配）；也可用 ROOTBOX_QC_STITCH_DIR")
+    p.add_argument("--stitch-script", dest="stitch_script",
+                   help="拼接脚本路径；也可用 ROOTBOX_QC_STITCH_SCRIPT")
     p.add_argument("--max-attempts", type=int, default=None, help="超过则转人工（默认取配置 3）")
     p.add_argument("--no-require-stitch", dest="require_stitch", action="store_false",
                    default=None, help="调试用：允许未配拼接目录启动（生产勿用）")
@@ -1137,6 +1143,11 @@ def main(argv=None) -> int:
         overrides["dry_run"] = True
     if getattr(args, "require_stitch", None) is False:
         overrides["require_stitch"] = False
+    # 拼接目录/脚本走配置树，命令行优先于环境变量（Settings 读的是 paths.*）
+    if getattr(args, "stitch_dir", None):
+        cfg.setdefault("paths", {})["stitch_output_dir"] = args.stitch_dir
+    if getattr(args, "stitch_script", None):
+        cfg.setdefault("paths", {})["stitch_script"] = args.stitch_script
 
     settings = Settings.from_env(cfg, **overrides)
     if not settings.watch_dir:
